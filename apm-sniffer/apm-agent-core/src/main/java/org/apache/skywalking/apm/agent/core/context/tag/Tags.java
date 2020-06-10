@@ -22,11 +22,12 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * The span tags are supported by sky-walking engine. As default, all tags will be stored, but these ones have
- * particular meanings.
+ * The span tags are supported by sky-walking engine. As default, all tags will be stored, but these
+ * ones have particular meanings.
  * <p>
  */
 public final class Tags {
+
     private static final Map<String, StringTag> TAG_PROTOTYPES = new ConcurrentHashMap<>();
 
     private Tags() {
@@ -78,14 +79,17 @@ public final class Tags {
     public static final StringTag MQ_TOPIC = new StringTag(9, "mq.topic");
 
     public static final class HTTP {
+
         public static final StringTag METHOD = new StringTag(10, "http.method");
 
         public static final StringTag PARAMS = new StringTag(11, "http.params");
     }
 
+    public static final StringTag BIZ_CODE = new StringTag(12, "biz_code", false);
+
     /**
-     * Creates a {@code StringTag} with the given key and cache it, if it's created before, simply return it without
-     * creating a new one.
+     * Creates a {@code StringTag} with the given key and cache it, if it's created before, simply
+     * return it without creating a new one.
      *
      * @param key the {@code key} of the tag
      * @return the {@code StringTag}

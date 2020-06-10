@@ -18,8 +18,6 @@
 
 package org.apache.skywalking.apm.agent.core.context.trace;
 
-import java.util.LinkedList;
-import java.util.List;
 import org.apache.skywalking.apm.agent.core.conf.RemoteDownstreamConfig;
 import org.apache.skywalking.apm.agent.core.context.ids.DistributedTraceId;
 import org.apache.skywalking.apm.agent.core.context.ids.DistributedTraceIds;
@@ -28,6 +26,10 @@ import org.apache.skywalking.apm.agent.core.context.ids.ID;
 import org.apache.skywalking.apm.agent.core.context.ids.NewDistributedTraceId;
 import org.apache.skywalking.apm.network.language.agent.UpstreamSegment;
 import org.apache.skywalking.apm.network.language.agent.v2.SegmentObject;
+import org.apache.skywalking.apm.util.StringUtil;
+
+import java.util.LinkedList;
+import java.util.List;
 
 /**
  * {@link TraceSegment} is a segment or fragment of the distributed trace. See https://github.com/opentracing/specification/blob/master/specification.md#the-opentracing-data-model
@@ -70,6 +72,10 @@ public class TraceSegment {
     private boolean isSizeLimited = false;
 
     private final long createTime;
+
+    private String methodType;
+
+    private String clientIp;
 
     /**
      * Create a default/empty trace segment, with current time as start time, and generate a new segment id.
@@ -175,6 +181,8 @@ public class TraceSegment {
         traceSegmentBuilder.setServiceId(RemoteDownstreamConfig.Agent.SERVICE_ID);
         traceSegmentBuilder.setServiceInstanceId(RemoteDownstreamConfig.Agent.SERVICE_INSTANCE_ID);
         traceSegmentBuilder.setIsSizeLimited(this.isSizeLimited);
+        traceSegmentBuilder.setMethodType(StringUtil.isEmpty(this.methodType) ? "unknown" : this.methodType);
+        traceSegmentBuilder.setClientIp(StringUtil.isEmpty(this.clientIp) ? "unknown" : this.clientIp);
 
         upstreamBuilder.setSegment(traceSegmentBuilder.build().toByteString());
         return upstreamBuilder.build();
@@ -191,5 +199,21 @@ public class TraceSegment {
 
     public long createTime() {
         return this.createTime;
+    }
+
+    public String getMethodType() {
+        return methodType;
+    }
+
+    public void setMethodType(String methodType) {
+        this.methodType = methodType;
+    }
+
+    public String getClientIp() {
+        return clientIp;
+    }
+
+    public void setClientIp(String clientIp) {
+        this.clientIp = clientIp;
     }
 }

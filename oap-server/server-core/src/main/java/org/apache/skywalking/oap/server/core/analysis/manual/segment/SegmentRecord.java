@@ -18,9 +18,6 @@
 
 package org.apache.skywalking.oap.server.core.analysis.manual.segment;
 
-import java.util.Base64;
-import java.util.HashMap;
-import java.util.Map;
 import lombok.Getter;
 import lombok.Setter;
 import org.apache.skywalking.apm.util.StringUtil;
@@ -32,6 +29,10 @@ import org.apache.skywalking.oap.server.core.source.DefaultScopeDefine;
 import org.apache.skywalking.oap.server.core.storage.StorageBuilder;
 import org.apache.skywalking.oap.server.core.storage.annotation.Column;
 import org.apache.skywalking.oap.server.library.util.CollectionUtils;
+
+import java.util.Base64;
+import java.util.HashMap;
+import java.util.Map;
 
 @Stream(name = SegmentRecord.INDEX_NAME, scopeId = DefaultScopeDefine.SEGMENT, builder = SegmentRecord.Builder.class, processor = RecordStreamProcessor.class)
 public class SegmentRecord extends Record {
@@ -49,6 +50,8 @@ public class SegmentRecord extends Record {
     public static final String IS_ERROR = "is_error";
     public static final String DATA_BINARY = "data_binary";
     public static final String VERSION = "version";
+    public static final String METHOD_TYPE = "method_type";
+    public static final String CLIENT_IP = "client_ip";
 
     @Setter
     @Getter
@@ -98,6 +101,14 @@ public class SegmentRecord extends Record {
     @Getter
     @Column(columnName = VERSION)
     private int version;
+    @Setter
+    @Getter
+    @Column(columnName = METHOD_TYPE)
+    private String methodType;
+    @Setter
+    @Getter
+    @Column(columnName = CLIENT_IP)
+    private String clientIp;
 
     @Override
     public String id() {
@@ -120,6 +131,8 @@ public class SegmentRecord extends Record {
             map.put(LATENCY, storageData.getLatency());
             map.put(IS_ERROR, storageData.getIsError());
             map.put(TIME_BUCKET, storageData.getTimeBucket());
+            map.put(METHOD_TYPE, storageData.getMethodType());
+            map.put(CLIENT_IP, storageData.getClientIp());
             if (CollectionUtils.isEmpty(storageData.getDataBinary())) {
                 map.put(DATA_BINARY, Const.EMPTY_STRING);
             } else {
@@ -143,8 +156,10 @@ public class SegmentRecord extends Record {
             record.setLatency(((Number) dbMap.get(LATENCY)).intValue());
             record.setIsError(((Number) dbMap.get(IS_ERROR)).intValue());
             record.setTimeBucket(((Number) dbMap.get(TIME_BUCKET)).longValue());
+            record.setMethodType((String) dbMap.get(METHOD_TYPE));
+            record.setClientIp((String) dbMap.get(CLIENT_IP));
             if (StringUtil.isEmpty((String) dbMap.get(DATA_BINARY))) {
-                record.setDataBinary(new byte[] {});
+                record.setDataBinary(new byte[]{});
             } else {
                 record.setDataBinary(Base64.getDecoder().decode((String) dbMap.get(DATA_BINARY)));
             }

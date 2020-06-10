@@ -18,10 +18,6 @@
 
 package org.apache.skywalking.apm.agent.core.context.trace;
 
-import java.util.ArrayList;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
 import org.apache.skywalking.apm.agent.core.context.ContextManager;
 import org.apache.skywalking.apm.agent.core.context.TracingContext;
 import org.apache.skywalking.apm.agent.core.context.tag.AbstractTag;
@@ -33,6 +29,11 @@ import org.apache.skywalking.apm.agent.core.dictionary.DictionaryUtil;
 import org.apache.skywalking.apm.network.language.agent.SpanType;
 import org.apache.skywalking.apm.network.language.agent.v2.SpanObjectV2;
 import org.apache.skywalking.apm.network.trace.component.Component;
+
+import java.util.ArrayList;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
 
 /**
  * The <code>AbstractTracingSpan</code> represents a group of {@link AbstractSpan} implementations, which belongs a real
@@ -75,6 +76,10 @@ public abstract class AbstractTracingSpan implements AbstractSpan {
     protected int componentId = 0;
 
     protected String componentName;
+
+    protected String methodType;
+
+    protected String clientIp;
 
     /**
      * Log is a concept from OpenTracing spec. https://github.com/opentracing/specification/blob/master/specification.md#log-structured-data
@@ -165,10 +170,10 @@ public abstract class AbstractTracingSpan implements AbstractSpan {
             logs = new LinkedList<>();
         }
         logs.add(new LogDataEntity.Builder().add(new KeyValuePair("event", "error"))
-                                            .add(new KeyValuePair("error.kind", t.getClass().getName()))
-                                            .add(new KeyValuePair("message", t.getMessage()))
-                                            .add(new KeyValuePair("stack", ThrowableTransformer.INSTANCE.convert2String(t, 4000)))
-                                            .build(System.currentTimeMillis()));
+                .add(new KeyValuePair("error.kind", t.getClass().getName()))
+                .add(new KeyValuePair("message", t.getMessage()))
+                .add(new KeyValuePair("stack", ThrowableTransformer.INSTANCE.convert2String(t, 4000)))
+                .build(System.currentTimeMillis()));
         return this;
     }
 
@@ -357,5 +362,27 @@ public abstract class AbstractTracingSpan implements AbstractSpan {
         owner.asyncStop(this);
         isAsyncStopped = true;
         return this;
+    }
+
+    @Override
+    public AbstractTracingSpan setMethodType(String methodType) {
+        this.methodType = methodType;
+        return this;
+    }
+
+    @Override
+    public String getMethodType() {
+        return methodType;
+    }
+
+    @Override
+    public AbstractTracingSpan setClientIp(String clientIp) {
+        this.clientIp = clientIp;
+        return this;
+    }
+
+    @Override
+    public String getClientIp() {
+        return clientIp;
     }
 }

@@ -34,4 +34,6 @@ public class SegmentCoreInfo {
     private long minuteTimeBucket;
     private byte[] dataBinary;
     private ProtocolVersion version;
+    private String methodType;
+    private String clientIp;
 }

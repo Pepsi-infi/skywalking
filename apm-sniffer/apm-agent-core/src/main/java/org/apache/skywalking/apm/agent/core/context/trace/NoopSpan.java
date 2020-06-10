@@ -130,6 +130,26 @@ public class NoopSpan implements AbstractSpan {
     }
 
     @Override
+    public AbstractSpan setMethodType(String methodType) {
+        return this;
+    }
+
+    @Override
+    public String getMethodType() {
+        return null;
+    }
+
+    @Override
+    public AbstractSpan setClientIp(String clientIp) {
+        return this;
+    }
+
+    @Override
+    public String getClientIp() {
+        return null;
+    }
+
+    @Override
     public AbstractSpan prepareForAsync() {
         return this;
     }

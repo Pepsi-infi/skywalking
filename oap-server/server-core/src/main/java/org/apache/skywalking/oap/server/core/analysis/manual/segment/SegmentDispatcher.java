@@ -40,6 +40,8 @@ public class SegmentDispatcher implements SourceDispatcher<Segment> {
         segment.setDataBinary(source.getDataBinary());
         segment.setTimeBucket(source.getTimeBucket());
         segment.setVersion(source.getVersion());
+        segment.setMethodType(source.getMethodType());
+        segment.setClientIp(source.getClientIp());
 
         RecordStreamProcessor.getInstance().in(segment);
     }

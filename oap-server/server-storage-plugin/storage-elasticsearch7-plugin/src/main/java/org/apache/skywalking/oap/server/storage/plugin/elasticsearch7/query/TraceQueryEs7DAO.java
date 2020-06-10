@@ -19,13 +19,16 @@
 package org.apache.skywalking.oap.server.storage.plugin.elasticsearch7.query;
 
 import com.google.common.base.Strings;
+import org.apache.skywalking.apm.network.common.KeyStringValuePair;
 import org.apache.skywalking.oap.server.core.analysis.manual.segment.SegmentRecord;
 import org.apache.skywalking.oap.server.core.query.entity.BasicTrace;
+import org.apache.skywalking.oap.server.core.query.entity.KeyValue;
 import org.apache.skywalking.oap.server.core.query.entity.QueryOrder;
 import org.apache.skywalking.oap.server.core.query.entity.TraceBrief;
 import org.apache.skywalking.oap.server.core.query.entity.TraceState;
 import org.apache.skywalking.oap.server.library.client.elasticsearch.ElasticSearchClient;
 import org.apache.skywalking.oap.server.library.util.BooleanUtils;
+import org.apache.skywalking.oap.server.library.util.CollectionUtils;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.MatchCNameBuilder;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.TraceQueryEsDAO;
 import org.elasticsearch.action.search.SearchResponse;
@@ -38,6 +41,8 @@ import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.sort.SortOrder;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public class TraceQueryEs7DAO extends TraceQueryEsDAO {
@@ -48,8 +53,8 @@ public class TraceQueryEs7DAO extends TraceQueryEsDAO {
 
     @Override
     public TraceBrief queryBasicTraces(long startSecondTB, long endSecondTB, long minDuration, long maxDuration,
-        String endpointName, int serviceId, int serviceInstanceId, int endpointId, String traceId, int limit, int from,
-        TraceState traceState, QueryOrder queryOrder) throws IOException {
+                                       String endpointName, int serviceId, int serviceInstanceId, int endpointId, String traceId, int limit, int from,
+                                       TraceState traceState, QueryOrder queryOrder) throws IOException {
         SearchSourceBuilder sourceBuilder = SearchSourceBuilder.searchSource();
 
         BoolQueryBuilder boolQueryBuilder = QueryBuilders.boolQuery();
@@ -113,16 +118,39 @@ public class TraceQueryEs7DAO extends TraceQueryEsDAO {
         for (SearchHit searchHit : response.getHits().getHits()) {
             BasicTrace basicTrace = new BasicTrace();
 
-            basicTrace.setSegmentId((String) searchHit.getSourceAsMap().get(SegmentRecord.SEGMENT_ID));
+            String segmentId = (String) searchHit.getSourceAsMap().get(SegmentRecord.SEGMENT_ID);
+            basicTrace.setSegmentId(segmentId);
             basicTrace.setStart(String.valueOf(searchHit.getSourceAsMap().get(SegmentRecord.START_TIME)));
-            basicTrace.getEndpointNames().add((String) searchHit.getSourceAsMap().get(SegmentRecord.ENDPOINT_NAME));
+            String operationName = (String) searchHit.getSourceAsMap().get(SegmentRecord.ENDPOINT_NAME);
+            basicTrace.getEndpointNames().add(operationName);
             basicTrace.setDuration(((Number) searchHit.getSourceAsMap().get(SegmentRecord.LATENCY)).intValue());
             basicTrace.setError(BooleanUtils.valueToBoolean(((Number) searchHit.getSourceAsMap()
-                                                                               .get(SegmentRecord.IS_ERROR)).intValue()));
-            basicTrace.getTraceIds().add((String) searchHit.getSourceAsMap().get(SegmentRecord.TRACE_ID));
+                    .get(SegmentRecord.IS_ERROR)).intValue()));
+            String resTraceId = (String) searchHit.getSourceAsMap().get(SegmentRecord.TRACE_ID);
+            basicTrace.getTraceIds().add(resTraceId);
+            basicTrace.setMethodType((String) searchHit.getSourceAsMap().get(SegmentRecord.METHOD_TYPE));
+            basicTrace.setClientIp((String) searchHit.getSourceAsMap().get(SegmentRecord.CLIENT_IP));
+
             traceBrief.getTraces().add(basicTrace);
+
         }
 
         return traceBrief;
+    }
+
+    private List<KeyValue> buildTags(List<KeyStringValuePair> tagsList) {
+        if (CollectionUtils.isEmpty(tagsList)) {
+            return Collections.emptyList();
+        }
+
+        List<KeyValue> keyValues = new ArrayList<>();
+        for (KeyStringValuePair tag : tagsList) {
+            KeyValue keyValue = new KeyValue();
+            keyValue.setKey(tag.getKey());
+            keyValue.setValue(tag.getValue());
+            keyValues.add(keyValue);
+        }
+
+        return keyValues;
     }
 }

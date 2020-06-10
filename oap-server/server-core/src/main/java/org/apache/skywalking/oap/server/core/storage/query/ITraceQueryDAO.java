@@ -18,8 +18,6 @@
 
 package org.apache.skywalking.oap.server.core.storage.query;
 
-import java.io.IOException;
-import java.util.List;
 import org.apache.skywalking.oap.server.core.analysis.manual.segment.SegmentRecord;
 import org.apache.skywalking.oap.server.core.query.entity.QueryOrder;
 import org.apache.skywalking.oap.server.core.query.entity.Span;
@@ -27,11 +25,14 @@ import org.apache.skywalking.oap.server.core.query.entity.TraceBrief;
 import org.apache.skywalking.oap.server.core.query.entity.TraceState;
 import org.apache.skywalking.oap.server.library.module.Service;
 
+import java.io.IOException;
+import java.util.List;
+
 public interface ITraceQueryDAO extends Service {
 
     TraceBrief queryBasicTraces(long startSecondTB, long endSecondTB, long minDuration, long maxDuration,
-        String endpointName, int serviceId, int serviceInstanceId, int endpointId, String traceId, int limit, int from,
-        TraceState traceState, QueryOrder queryOrder) throws IOException;
+                                String endpointName, int serviceId, int serviceInstanceId, int endpointId, String traceId, int limit, int from,
+                                                                         TraceState traceState, QueryOrder queryOrder) throws IOException;
 
     List<SegmentRecord> queryByTraceId(String traceId) throws IOException;
 

@@ -18,10 +18,11 @@
 
 package org.apache.skywalking.oap.server.core.query.entity;
 
-import java.util.ArrayList;
-import java.util.List;
 import lombok.Getter;
 import lombok.Setter;
+
+import java.util.ArrayList;
+import java.util.List;
 
 @Getter
 public class BasicTrace {
@@ -35,6 +36,10 @@ public class BasicTrace {
     @Setter
     private boolean isError;
     private final List<String> traceIds;
+    @Setter
+    private String methodType;
+    @Setter
+    private String clientIp;
 
     public BasicTrace() {
         this.endpointNames = new ArrayList<>();

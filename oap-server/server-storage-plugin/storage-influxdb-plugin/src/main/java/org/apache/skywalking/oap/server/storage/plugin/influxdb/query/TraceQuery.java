@@ -19,10 +19,6 @@
 package org.apache.skywalking.oap.server.storage.plugin.influxdb.query;
 
 import com.google.common.collect.Lists;
-import java.io.IOException;
-import java.util.Base64;
-import java.util.Collections;
-import java.util.List;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.skywalking.oap.server.core.analysis.manual.segment.SegmentRecord;
 import org.apache.skywalking.oap.server.core.query.entity.BasicTrace;
@@ -40,6 +36,11 @@ import org.influxdb.dto.QueryResult;
 import org.influxdb.querybuilder.SelectQueryImpl;
 import org.influxdb.querybuilder.WhereQueryImpl;
 import org.influxdb.querybuilder.clauses.Clause;
+
+import java.io.IOException;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.List;
 
 import static org.influxdb.querybuilder.BuiltQuery.QueryBuilder.eq;
 import static org.influxdb.querybuilder.BuiltQuery.QueryBuilder.gte;
@@ -69,7 +70,7 @@ public class TraceQuery implements ITraceQueryDAO {
                                        int from,
                                        TraceState traceState,
                                        QueryOrder queryOrder)
-        throws IOException {
+            throws IOException {
 
         String orderBy = SegmentRecord.START_TIME;
         if (queryOrder == QueryOrder.BY_DURATION) {
@@ -77,19 +78,19 @@ public class TraceQuery implements ITraceQueryDAO {
         }
 
         WhereQueryImpl<SelectQueryImpl> recallQuery = select()
-            .function("top", orderBy, limit + from)
-            .column(SegmentRecord.SEGMENT_ID)
-            .column(SegmentRecord.START_TIME)
-            .column(SegmentRecord.ENDPOINT_NAME)
-            .column(SegmentRecord.LATENCY)
-            .column(SegmentRecord.IS_ERROR)
-            .column(SegmentRecord.TRACE_ID)
-            .from(client.getDatabase(), SegmentRecord.INDEX_NAME)
-            .where();
+                .function("top", orderBy, limit + from)
+                .column(SegmentRecord.SEGMENT_ID)
+                .column(SegmentRecord.START_TIME)
+                .column(SegmentRecord.ENDPOINT_NAME)
+                .column(SegmentRecord.LATENCY)
+                .column(SegmentRecord.IS_ERROR)
+                .column(SegmentRecord.TRACE_ID)
+                .from(client.getDatabase(), SegmentRecord.INDEX_NAME)
+                .where();
 
         if (startSecondTB != 0 && endSecondTB != 0) {
             recallQuery.and(gte(SegmentRecord.TIME_BUCKET, startSecondTB))
-                       .and(lte(SegmentRecord.TIME_BUCKET, endSecondTB));
+                    .and(lte(SegmentRecord.TIME_BUCKET, endSecondTB));
         }
         if (minDuration != 0) {
             recallQuery.and(gte(SegmentRecord.LATENCY, minDuration));
@@ -122,9 +123,9 @@ public class TraceQuery implements ITraceQueryDAO {
         }
 
         WhereQueryImpl<SelectQueryImpl> countQuery = select()
-            .count(SegmentRecord.ENDPOINT_ID)
-            .from(client.getDatabase(), SegmentRecord.INDEX_NAME)
-            .where();
+                .count(SegmentRecord.ENDPOINT_ID)
+                .from(client.getDatabase(), SegmentRecord.INDEX_NAME)
+                .where();
         for (Clause clause : recallQuery.getClauses()) {
             countQuery.where(clause);
         }
@@ -167,18 +168,18 @@ public class TraceQuery implements ITraceQueryDAO {
     @Override
     public List<SegmentRecord> queryByTraceId(String traceId) throws IOException {
         WhereQueryImpl query = select().column(SegmentRecord.SEGMENT_ID)
-                                       .column(SegmentRecord.TRACE_ID)
-                                       .column(SegmentRecord.SERVICE_ID)
-                                       .column(SegmentRecord.ENDPOINT_NAME)
-                                       .column(SegmentRecord.START_TIME)
-                                       .column(SegmentRecord.END_TIME)
-                                       .column(SegmentRecord.LATENCY)
-                                       .column(SegmentRecord.IS_ERROR)
-                                       .column(SegmentRecord.DATA_BINARY)
-                                       .column(SegmentRecord.VERSION)
-                                       .from(client.getDatabase(), SegmentRecord.INDEX_NAME)
-                                       .where()
-                                       .and(eq(SegmentRecord.TRACE_ID, traceId));
+                .column(SegmentRecord.TRACE_ID)
+                .column(SegmentRecord.SERVICE_ID)
+                .column(SegmentRecord.ENDPOINT_NAME)
+                .column(SegmentRecord.START_TIME)
+                .column(SegmentRecord.END_TIME)
+                .column(SegmentRecord.LATENCY)
+                .column(SegmentRecord.IS_ERROR)
+                .column(SegmentRecord.DATA_BINARY)
+                .column(SegmentRecord.VERSION)
+                .from(client.getDatabase(), SegmentRecord.INDEX_NAME)
+                .where()
+                .and(eq(SegmentRecord.TRACE_ID, traceId));
         List<QueryResult.Series> series = client.queryForSeries(query);
         if (log.isDebugEnabled()) {
             log.debug("SQL: {} result set: {}", query.getCommand(), series);
@@ -215,4 +216,5 @@ public class TraceQuery implements ITraceQueryDAO {
     public List<Span> doFlexibleTraceQuery(String traceId) throws IOException {
         return Collections.emptyList();
     }
+
 }

@@ -18,10 +18,6 @@
 
 package org.apache.skywalking.apm.agent.core.context;
 
-import java.util.LinkedList;
-import java.util.List;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
-import java.util.concurrent.locks.ReentrantLock;
 import org.apache.skywalking.apm.agent.core.boot.ServiceManager;
 import org.apache.skywalking.apm.agent.core.conf.Config;
 import org.apache.skywalking.apm.agent.core.conf.RemoteDownstreamConfig;
@@ -42,6 +38,11 @@ import org.apache.skywalking.apm.agent.core.logging.api.LogManager;
 import org.apache.skywalking.apm.agent.core.profile.ProfileTaskExecutionService;
 import org.apache.skywalking.apm.agent.core.sampling.SamplingService;
 import org.apache.skywalking.apm.util.StringUtil;
+
+import java.util.LinkedList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * The <code>TracingContext</code> represents a core tracing logic controller. It build the final {@link
@@ -97,7 +98,7 @@ public class TracingContext implements AbstractTracerContext {
     @SuppressWarnings("unused") // updated by ASYNC_SPAN_COUNTER_UPDATER
     private volatile int asyncSpanCounter;
     private static final AtomicIntegerFieldUpdater<TracingContext> ASYNC_SPAN_COUNTER_UPDATER =
-        AtomicIntegerFieldUpdater.newUpdater(TracingContext.class, "asyncSpanCounter");
+            AtomicIntegerFieldUpdater.newUpdater(TracingContext.class, "asyncSpanCounter");
     private volatile boolean isRunningInAsyncMode;
     private volatile ReentrantLock asyncFinishLock;
 
@@ -258,7 +259,7 @@ public class TracingContext implements AbstractTracerContext {
     public ContextSnapshot capture() {
         List<TraceSegmentRef> refs = this.segment.getRefs();
         ContextSnapshot snapshot = new ContextSnapshot(
-            segment.getTraceSegmentId(), activeSpan().getSpanId(), segment.getRelatedGlobalTraces());
+                segment.getTraceSegmentId(), activeSpan().getSpanId(), segment.getRelatedGlobalTraces());
         int entryOperationId;
         String entryOperationName = "";
         int entryApplicationInstanceId;
@@ -359,24 +360,24 @@ public class TracingContext implements AbstractTracerContext {
              */
             profilingRecheck(parentSpan, operationName);
             entrySpan = (AbstractTracingSpan) DictionaryManager.findEndpointSection()
-                                                               .findOnly(segment.getServiceId(), operationName)
-                                                               .doInCondition(
-                                                                   parentSpan::setOperationId, () -> parentSpan
-                                                                       .setOperationName(operationName));
+                    .findOnly(segment.getServiceId(), operationName)
+                    .doInCondition(
+                            parentSpan::setOperationId, () -> parentSpan
+                                    .setOperationName(operationName));
             return entrySpan.start();
         } else {
             entrySpan = (AbstractTracingSpan) DictionaryManager.findEndpointSection()
-                                                               .findOnly(segment.getServiceId(), operationName)
-                                                               .doInCondition(
-                                                                   operationId -> new EntrySpan(spanIdGenerator++,
-                                                                                                parentSpanId,
-                                                                                                operationId, owner
-                                                                   ), () -> {
-                                                                       return new EntrySpan(
-                                                                           spanIdGenerator++, parentSpanId,
-                                                                           operationName, owner
-                                                                       );
-                                                                   });
+                    .findOnly(segment.getServiceId(), operationName)
+                    .doInCondition(
+                            operationId -> new EntrySpan(spanIdGenerator++,
+                                    parentSpanId,
+                                    operationId, owner
+                            ), () -> {
+                                return new EntrySpan(
+                                        spanIdGenerator++, parentSpanId,
+                                        operationName, owner
+                                );
+                            });
             entrySpan.start();
             return push(entrySpan);
         }
@@ -432,16 +433,16 @@ public class TracingContext implements AbstractTracerContext {
                 exitSpan = new ExitSpan(spanIdGenerator++, parentSpanId, operationName, owner);
             } else {
                 exitSpan = (AbstractSpan) DictionaryManager.findNetworkAddressSection()
-                                                           .find(remotePeer)
-                                                           .doInCondition(
-                                                               peerId -> new ExitSpan(spanIdGenerator++, parentSpanId,
-                                                                                      operationName, peerId, owner
-                                                               ), () -> {
-                                                                   return new ExitSpan(
-                                                                       spanIdGenerator++, parentSpanId, operationName,
-                                                                       remotePeer, owner
-                                                                   );
-                                                               });
+                        .find(remotePeer)
+                        .doInCondition(
+                                peerId -> new ExitSpan(spanIdGenerator++, parentSpanId,
+                                        operationName, peerId, owner
+                                ), () -> {
+                                    return new ExitSpan(
+                                            spanIdGenerator++, parentSpanId, operationName,
+                                            remotePeer, owner
+                                    );
+                                });
             }
             push(exitSpan);
         }
@@ -470,6 +471,9 @@ public class TracingContext implements AbstractTracerContext {
     @Override
     public boolean stopSpan(AbstractSpan span) {
         AbstractSpan lastSpan = peek();
+        logger.info("http methodType is:{},clientIp is:{}", span.getMethodType(), span.getClientIp());
+        segment.setMethodType(span.getMethodType());
+        segment.setClientIp(span.getClientIp());
         if (lastSpan == span) {
             if (lastSpan instanceof AbstractTracingSpan) {
                 AbstractTracingSpan toFinishSpan = (AbstractTracingSpan) lastSpan;
@@ -673,8 +677,8 @@ public class TracingContext implements AbstractTracerContext {
             long currentTimeMillis = System.currentTimeMillis();
             if (currentTimeMillis - lastWarningTimestamp > 30 * 1000) {
                 logger.warn(
-                    new RuntimeException("Shadow tracing context. Thread dump"),
-                    "More than {} spans required to create", Config.Agent.SPAN_LIMIT_PER_SEGMENT
+                        new RuntimeException("Shadow tracing context. Thread dump"),
+                        "More than {} spans required to create", Config.Agent.SPAN_LIMIT_PER_SEGMENT
                 );
                 lastWarningTimestamp = currentTimeMillis;
             }

@@ -18,12 +18,13 @@
 
 package org.apache.skywalking.apm.agent.core.context.trace;
 
-import java.util.Map;
 import org.apache.skywalking.apm.agent.core.context.AsyncSpan;
 import org.apache.skywalking.apm.agent.core.context.tag.AbstractTag;
 import org.apache.skywalking.apm.agent.core.context.tag.Tags;
 import org.apache.skywalking.apm.network.trace.component.Component;
 import org.apache.skywalking.apm.network.trace.component.ComponentsDefine;
+
+import java.util.Map;
 
 /**
  * The <code>AbstractSpan</code> represents the span's skeleton, which contains all open methods.
@@ -126,4 +127,12 @@ public interface AbstractSpan extends AsyncSpan {
     AbstractSpan start(long startTime);
 
     AbstractSpan setPeer(String remotePeer);
+
+    AbstractSpan setMethodType(String methodType);
+
+    String getMethodType();
+
+    AbstractSpan setClientIp(String clientIp);
+
+    String getClientIp();
 }
