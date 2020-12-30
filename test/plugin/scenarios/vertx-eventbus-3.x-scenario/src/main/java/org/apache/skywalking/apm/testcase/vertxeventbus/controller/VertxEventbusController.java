@@ -15,6 +15,7 @@
  * limitations under the License.
  *
  */
+
 package org.apache.skywalking.apm.testcase.vertxeventbus.controller;
 
 import io.vertx.core.AbstractVerticle;
@@ -30,7 +31,7 @@ public class VertxEventbusController extends AbstractVerticle {
     @Override
     public void start() {
         Router router = Router.router(vertx);
-        router.get("/vertx-eventbus-3-scenario/case/eventbus-case").handler(this::handleCoreCase);
+        router.get("/vertx-eventbus-3-scenario/case/eventbus-case").handler(this::handleEventbusCase);
         router.get("/vertx-eventbus-3-scenario/case/executeTest").handler(this::executeTest);
         router.head("/vertx-eventbus-3-scenario/case/healthCheck").handler(this::healthCheck);
         vertx.createHttpServer().requestHandler(router::accept).listen(8080);
@@ -39,7 +40,7 @@ public class VertxEventbusController extends AbstractVerticle {
         vertx.deployVerticle(LocalReceiver.class.getName());
     }
 
-    private void handleCoreCase(RoutingContext routingContext) {
+    private void handleEventbusCase(RoutingContext routingContext) {
         vertx.createHttpClient().getNow(8080, "localhost",
                 "/vertx-eventbus-3-scenario/case/executeTest",
                 it -> routingContext.response().setStatusCode(it.statusCode()).end());
@@ -51,7 +52,7 @@ public class VertxEventbusController extends AbstractVerticle {
         vertx.eventBus().send("local-message-receiver", localMessage, reply -> {
             if (reply.succeeded()) {
                 CustomMessage replyMessage = (CustomMessage) reply.result().body();
-                System.out.println("Received local reply: " + replyMessage.getMessage());
+                replyMessage.getMessage();
                 localMessageFuture.complete();
             } else {
                 localMessageFuture.fail(reply.cause());
@@ -63,7 +64,7 @@ public class VertxEventbusController extends AbstractVerticle {
         vertx.eventBus().send("cluster-message-receiver", clusterWideMessage, reply -> {
             if (reply.succeeded()) {
                 CustomMessage replyMessage = (CustomMessage) reply.result().body();
-                System.out.println("Received cluster reply: " + replyMessage.getMessage());
+                replyMessage.getMessage();
                 clusterMessageFuture.complete();
             } else {
                 clusterMessageFuture.fail(reply.cause());

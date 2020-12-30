@@ -22,14 +22,13 @@ import freemarker.template.TemplateExceptionHandler;
 import java.io.File;
 import java.io.FileWriter;
 import java.lang.invoke.MethodHandles;
-import java.util.HashMap;
 import java.util.Map;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.skywalking.plugin.test.helper.exception.GenerateFailedException;
 
 public abstract class AbstractRunningGenerator implements ScenarioRunningScriptGenerator {
-    private static final Logger logger = LogManager.getLogger(MethodHandles.lookup().lookupClass());
+    private static final Logger LOGGER = LogManager.getLogger(MethodHandles.lookup().lookupClass());
     protected final Configuration cfg;
 
     protected AbstractRunningGenerator() {
@@ -56,7 +55,7 @@ public abstract class AbstractRunningGenerator implements ScenarioRunningScriptG
             cfg.getTemplate("scenario.sh")
                .process(root, new FileWriter(new File(configuration.outputDir() + File.separator + "scenario.sh")));
         } catch (Exception e) {
-            logger.error("Failed to write scenario.sh", e);
+            LOGGER.error("Failed to write scenario.sh", e);
         }
     }
 

@@ -19,7 +19,7 @@ segmentItems:
   segments:
   - segmentId: not null
     spans:
-    - operationName: /greet/{username}
+    - operationName: '{GET}/greet/{username}'
       operationId: 0
       parentSpanId: -1
       spanId: 0
@@ -51,7 +51,7 @@ segmentItems:
       - {key: url, value: 'https://github.com:-1/apache/skywalking'}
       - {key: http.method, value: GET}
       skipAnalysis: 'false'
-    - operationName: Threading/test.org.apache.skywalking.apm.testcase.jdk.threading.Application$TestController$1/run
+    - operationName: Threading/test.apache.skywalking.apm.testcase.jdk.threading.Application$TestController$1/run
       operationId: 0
       parentSpanId: -1
       spanId: 0
@@ -63,7 +63,7 @@ segmentItems:
       spanType: Local
       peer: ''
       refs:
-      - {parentEndpoint: '/greet/{username}', networkAddress: '', refType: CrossThread,
+      - {parentEndpoint: '{GET}/greet/{username}', networkAddress: '', refType: CrossThread,
         parentSpanId: 0, parentTraceSegmentId: not null, parentServiceInstance: not
           null, parentService: jdk-threading-scenario, traceId: not null}
       skipAnalysis: 'false'
@@ -84,7 +84,7 @@ segmentItems:
       - {key: url, value: 'https://github.com:-1/apache/skywalking'}
       - {key: http.method, value: GET}
       skipAnalysis: 'false'
-    - operationName: Threading/test.org.apache.skywalking.apm.testcase.jdk.threading.Application$TestController$2/call
+    - operationName: Threading/test.apache.skywalking.apm.testcase.jdk.threading.Application$TestController$2/call
       operationId: 0
       parentSpanId: -1
       spanId: 0
@@ -96,7 +96,7 @@ segmentItems:
       spanType: Local
       peer: ''
       refs:
-      - {parentEndpoint: '/greet/{username}', networkAddress: '', refType: CrossThread,
+      - {parentEndpoint: '{GET}/greet/{username}', networkAddress: '', refType: CrossThread,
         parentSpanId: 0, parentTraceSegmentId: not null, parentServiceInstance: not
           null, parentService: jdk-threading-scenario, traceId: not null}
       skipAnalysis: 'false'

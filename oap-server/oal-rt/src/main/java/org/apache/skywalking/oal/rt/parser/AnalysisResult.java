@@ -18,29 +18,33 @@
 
 package org.apache.skywalking.oal.rt.parser;
 
+import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
-import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.Setter;
 import org.apache.skywalking.oap.server.core.storage.type.StorageDataComplexObject;
 
-@Getter(AccessLevel.PUBLIC)
-@Setter(AccessLevel.PUBLIC)
+@Getter
+@Setter
 public class AnalysisResult {
     private String varName;
 
     private String metricsName;
 
+    private String metricsClassPackage;
+
     private String tableName;
 
     private String packageName;
+
+    private String sourcePackage;
 
     private String sourceName;
 
     private int sourceScopeId;
 
-    private String sourceAttribute;
+    private List<String> sourceAttribute = new ArrayList<>();
 
     private String aggregationFunctionName;
 
@@ -54,7 +58,10 @@ public class AnalysisResult {
 
     private List<ConditionExpression> funcConditionExpressions;
 
+    private int funcConditionExpressionGetIdx = 0;
+
     private List<Argument> funcArgs;
+
     private int argGetIdx = 0;
 
     private List<DataColumn> persistentFields;
@@ -76,6 +83,10 @@ public class AnalysisResult {
             funcConditionExpressions = new LinkedList<>();
         }
         funcConditionExpressions.add(conditionExpression);
+    }
+
+    public ConditionExpression getNextFuncConditionExpression() {
+        return funcConditionExpressions.get(funcConditionExpressionGetIdx++);
     }
 
     public void addFilterExpressions(Expression filterExpression) {

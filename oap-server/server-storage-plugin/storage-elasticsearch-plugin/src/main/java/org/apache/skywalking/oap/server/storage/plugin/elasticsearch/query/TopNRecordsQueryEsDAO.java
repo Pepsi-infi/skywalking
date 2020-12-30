@@ -21,6 +21,7 @@ package org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.apache.skywalking.apm.util.StringUtil;
 import org.apache.skywalking.oap.server.core.analysis.IDManager;
 import org.apache.skywalking.oap.server.core.analysis.topn.TopN;
@@ -50,8 +51,8 @@ public class TopNRecordsQueryEsDAO extends EsDAO implements ITopNRecordsQueryDAO
         SearchSourceBuilder sourceBuilder = SearchSourceBuilder.searchSource();
         BoolQueryBuilder boolQueryBuilder = QueryBuilders.boolQuery();
         boolQueryBuilder.must().add(QueryBuilders.rangeQuery(TopN.TIME_BUCKET)
-                                                 .gte(duration.getStartTimeBucket())
-                                                 .lte(duration.getEndTimeBucket()));
+                                                 .gte(duration.getStartTimeBucketInSec())
+                                                 .lte(duration.getEndTimeBucketInSec()));
 
         if (StringUtil.isNotEmpty(condition.getParentService())) {
             final String serviceId = IDManager.ServiceID.buildId(condition.getParentService(), condition.isNormal());
@@ -67,9 +68,11 @@ public class TopNRecordsQueryEsDAO extends EsDAO implements ITopNRecordsQueryDAO
 
         for (SearchHit searchHit : response.getHits().getHits()) {
             SelectedRecord record = new SelectedRecord();
-            record.setName((String) searchHit.getSourceAsMap().get(TopN.STATEMENT));
-            record.setRefId((String) searchHit.getSourceAsMap().get(TopN.TRACE_ID));
-            record.setValue(((Number) searchHit.getSourceAsMap().get(valueColumnName)).toString());
+            final Map<String, Object> sourceAsMap = searchHit.getSourceAsMap();
+            record.setName((String) sourceAsMap.get(TopN.STATEMENT));
+            record.setRefId((String) sourceAsMap.get(TopN.TRACE_ID));
+            record.setId(record.getRefId());
+            record.setValue(((Number) sourceAsMap.get(valueColumnName)).toString());
             results.add(record);
         }
 

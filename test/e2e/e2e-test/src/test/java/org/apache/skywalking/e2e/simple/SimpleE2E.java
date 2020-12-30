@@ -19,6 +19,7 @@
 package org.apache.skywalking.e2e.simple;
 
 import java.util.List;
+import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.skywalking.e2e.annotation.ContainerHostAndPort;
 import org.apache.skywalking.e2e.annotation.DockerCompose;
@@ -56,11 +57,15 @@ import org.junit.jupiter.api.BeforeAll;
 import org.testcontainers.containers.DockerComposeContainer;
 
 import static org.apache.skywalking.e2e.metrics.MetricsMatcher.verifyMetrics;
+import static org.apache.skywalking.e2e.metrics.MetricsMatcher.verifyPercentileMetrics;
 import static org.apache.skywalking.e2e.metrics.MetricsQuery.ALL_ENDPOINT_METRICS;
+import static org.apache.skywalking.e2e.metrics.MetricsQuery.ALL_ENDPOINT_MULTIPLE_LINEAR_METRICS;
+import static org.apache.skywalking.e2e.metrics.MetricsQuery.ALL_INSTANCE_JVM_METRICS;
 import static org.apache.skywalking.e2e.metrics.MetricsQuery.ALL_INSTANCE_METRICS;
 import static org.apache.skywalking.e2e.metrics.MetricsQuery.ALL_SERVICE_INSTANCE_RELATION_CLIENT_METRICS;
 import static org.apache.skywalking.e2e.metrics.MetricsQuery.ALL_SERVICE_INSTANCE_RELATION_SERVER_METRICS;
 import static org.apache.skywalking.e2e.metrics.MetricsQuery.ALL_SERVICE_METRICS;
+import static org.apache.skywalking.e2e.metrics.MetricsQuery.ALL_SERVICE_MULTIPLE_LINEAR_METRICS;
 import static org.apache.skywalking.e2e.metrics.MetricsQuery.ALL_SERVICE_RELATION_CLIENT_METRICS;
 import static org.apache.skywalking.e2e.metrics.MetricsQuery.ALL_SERVICE_RELATION_SERVER_METRICS;
 import static org.apache.skywalking.e2e.utils.Times.now;
@@ -109,11 +114,11 @@ public class SimpleE2E extends SkyWalkingTestAdapter {
 
     @SuppressWarnings("unused")
     @ContainerHostAndPort(name = "ui", port = 8080)
-    private HostAndPort swWebappHostPort;
+    protected HostAndPort swWebappHostPort;
 
     @SuppressWarnings("unused")
     @ContainerHostAndPort(name = "provider", port = 9090)
-    private HostAndPort serviceHostPort;
+    protected HostAndPort serviceHostPort;
 
     @BeforeAll
     void setUp() throws Exception {
@@ -129,8 +134,9 @@ public class SimpleE2E extends SkyWalkingTestAdapter {
 
     @RetryableTest
     void services() throws Exception {
-        final List<Service> services = graphql.services(new ServicesQuery().start(startTime).end(now()));
+        List<Service> services = graphql.services(new ServicesQuery().start(startTime).end(now()));
 
+        services = services.stream().filter(s -> !s.getLabel().equals("oap::oap-server")).collect(Collectors.toList());
         LOGGER.info("services: {}", services);
 
         load("expected/simple/services.yml").as(ServicesMatcher.class).verify(services);
@@ -143,6 +149,8 @@ public class SimpleE2E extends SkyWalkingTestAdapter {
             final Instances instances = verifyServiceInstances(service);
 
             verifyInstancesMetrics(instances);
+
+            verifyInstancesJVMMetrics(instances);
 
             final Endpoints endpoints = verifyServiceEndpoints(service);
 
@@ -228,6 +236,26 @@ public class SimpleE2E extends SkyWalkingTestAdapter {
         }
     }
 
+    private void verifyInstancesJVMMetrics(final Instances instances) throws Exception {
+        for (Instance instance : instances.getInstances()) {
+            for (String metricsName : ALL_INSTANCE_JVM_METRICS) {
+                LOGGER.info("verifying service instance response time: {}", instance);
+                final Metrics instanceJVMMetrics = graphql.metrics(
+                    new MetricsQuery().stepByMinute().metricsName(metricsName).id(instance.getKey())
+                );
+
+                LOGGER.info("instance jvm metrics: {}", instanceJVMMetrics);
+
+                final AtLeastOneOfMetricsMatcher instanceThreadMatcher = new AtLeastOneOfMetricsMatcher();
+                final MetricsValueMatcher greaterThanZero = new MetricsValueMatcher();
+                greaterThanZero.setValue("gt 0");
+                instanceThreadMatcher.setValue(greaterThanZero);
+                instanceThreadMatcher.verify(instanceJVMMetrics);
+                LOGGER.info("{}: {}", metricsName, instanceJVMMetrics);
+            }
+        }
+    }
+
     private void verifyEndpointsMetrics(final Endpoints endpoints) throws Exception {
         for (Endpoint endpoint : endpoints.getEndpoints()) {
             if (!endpoint.getLabel().equals("/users")) {
@@ -250,6 +278,9 @@ public class SimpleE2E extends SkyWalkingTestAdapter {
 
                 LOGGER.info("{}: {}", metricName, metrics);
             }
+            for (String metricName : ALL_ENDPOINT_MULTIPLE_LINEAR_METRICS) {
+                verifyPercentileMetrics(graphql, metricName, endpoint.getKey(), startTime);
+            }
         }
     }
 
@@ -257,7 +288,7 @@ public class SimpleE2E extends SkyWalkingTestAdapter {
         for (String metricName : ALL_SERVICE_METRICS) {
             LOGGER.info("verifying service {}, metrics: {}", service, metricName);
             final Metrics serviceMetrics = graphql.metrics(
-                new MetricsQuery().stepByMinute().metricsName(metricName).id(service.getKey())
+                    new MetricsQuery().stepByMinute().metricsName(metricName).id(service.getKey())
             );
             LOGGER.info("serviceMetrics: {}", serviceMetrics);
             final AtLeastOneOfMetricsMatcher instanceRespTimeMatcher = new AtLeastOneOfMetricsMatcher();
@@ -266,6 +297,10 @@ public class SimpleE2E extends SkyWalkingTestAdapter {
             instanceRespTimeMatcher.setValue(greaterThanZero);
             instanceRespTimeMatcher.verify(serviceMetrics);
             LOGGER.info("{}: {}", metricName, serviceMetrics);
+        }
+
+        for (String metricName : ALL_SERVICE_MULTIPLE_LINEAR_METRICS) {
+            verifyPercentileMetrics(graphql, metricName, service.getKey(), startTime);
         }
     }
 

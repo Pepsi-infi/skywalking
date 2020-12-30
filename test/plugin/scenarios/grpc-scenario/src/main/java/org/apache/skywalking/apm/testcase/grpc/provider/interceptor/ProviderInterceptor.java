@@ -24,69 +24,71 @@ import io.grpc.Metadata;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
+
 import java.util.HashMap;
 import java.util.Map;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 public class ProviderInterceptor implements ServerInterceptor {
-    private Logger logger = LogManager.getLogger(ProviderInterceptor.class);
+    private static final Logger LOGGER = LogManager.getLogger(ProviderInterceptor.class);
 
     @Override
-    public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call, Metadata metadata,
-        ServerCallHandler<ReqT, RespT> handler) {
+    public <REQ_T, RESQ_T> ServerCall.Listener<REQ_T> interceptCall(ServerCall<REQ_T, RESQ_T> call, Metadata metadata,
+                                                                    ServerCallHandler<REQ_T, RESQ_T> handler) {
         Map<String, String> headerMap = new HashMap<String, String>();
         for (String key : metadata.keys()) {
-            logger.info("Receive key: {}", key);
+            LOGGER.info("Receive key: {}", key);
             if (!key.endsWith(Metadata.BINARY_HEADER_SUFFIX)) {
                 String value = metadata.get(Metadata.Key.of(key, Metadata.ASCII_STRING_MARSHALLER));
 
                 headerMap.put(key, value);
             }
         }
-        logger.info("authority : {}", call.getAuthority());
-        return new ForwardingServerCallListener.SimpleForwardingServerCallListener<ReqT>(handler.startCall(new ForwardingServerCall.SimpleForwardingServerCall<ReqT, RespT>(call) {
+        LOGGER.info("authority : {}", call.getAuthority());
+        return new ForwardingServerCallListener.SimpleForwardingServerCallListener<REQ_T>(handler.startCall(new ForwardingServerCall.SimpleForwardingServerCall<REQ_T, RESQ_T>(call) {
             @Override
             public void sendHeaders(Metadata responseHeaders) {
-                logger.info("sendHeaders....");
+                LOGGER.info("sendHeaders....");
                 Metadata.Key<String> headerKey = Metadata.Key.of("test-server", Metadata.ASCII_STRING_MARSHALLER);
                 responseHeaders.put(headerKey, "test-server");
                 delegate().sendHeaders(responseHeaders);
             }
 
             @Override
-            public void sendMessage(RespT message) {
+            public void sendMessage(RESQ_T message) {
                 delegate().sendMessage(message);
             }
 
         }, metadata)) {
             @Override
             public void onReady() {
-                logger.info("onReady....");
+                LOGGER.info("onReady....");
                 delegate().onReady();
             }
 
             @Override
             public void onCancel() {
-                logger.info("onCancel....");
+                LOGGER.info("onCancel....");
                 delegate().onCancel();
             }
 
             @Override
             public void onComplete() {
-                logger.info("onComplete....");
+                LOGGER.info("onComplete....");
                 delegate().onComplete();
             }
 
             @Override
             public void onHalfClose() {
-                logger.info("onHalfClose....");
+                LOGGER.info("onHalfClose....");
                 delegate().onHalfClose();
             }
 
             @Override
-            public void onMessage(ReqT message) {
-                logger.info("onMessage....");
+            public void onMessage(REQ_T message) {
+                LOGGER.info("onMessage....");
                 delegate().onMessage(message);
             }
         };

@@ -19,8 +19,10 @@
 package org.apache.skywalking.oap.server.storage.plugin.influxdb.base;
 
 import org.apache.skywalking.oap.server.core.analysis.config.NoneStream;
+import org.apache.skywalking.oap.server.core.analysis.management.ManagementData;
 import org.apache.skywalking.oap.server.core.analysis.metrics.Metrics;
 import org.apache.skywalking.oap.server.core.analysis.record.Record;
+import org.apache.skywalking.oap.server.core.storage.IManagementDAO;
 import org.apache.skywalking.oap.server.core.storage.IMetricsDAO;
 import org.apache.skywalking.oap.server.core.storage.INoneStreamDAO;
 import org.apache.skywalking.oap.server.core.storage.IRecordDAO;
@@ -42,11 +44,16 @@ public class InfluxStorageDAO implements StorageDAO {
 
     @Override
     public IRecordDAO newRecordDao(StorageBuilder<Record> storageBuilder) {
-        return new RecordDAO(influxClient, storageBuilder);
+        return new RecordDAO(storageBuilder);
     }
 
     @Override
     public INoneStreamDAO newNoneStreamDao(StorageBuilder<NoneStream> storageBuilder) {
         return new NoneStreamDAO(influxClient, storageBuilder);
+    }
+
+    @Override
+    public IManagementDAO newManagementDao(final StorageBuilder<ManagementData> storageBuilder) {
+        return new ManagementDAO(influxClient, storageBuilder);
     }
 }

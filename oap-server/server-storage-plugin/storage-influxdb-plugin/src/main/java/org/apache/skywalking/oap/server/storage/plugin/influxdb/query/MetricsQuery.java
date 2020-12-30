@@ -60,21 +60,23 @@ public class MetricsQuery implements IMetricsQueryDAO {
     }
 
     @Override
-    public int readMetricsValue(final MetricsCondition condition,
+    public long readMetricsValue(final MetricsCondition condition,
                                 final String valueColumnName,
                                 final Duration duration) throws IOException {
+        final int defaultValue = ValueColumnMetadata.INSTANCE.getDefaultValue(condition.getName());
         final Function function = ValueColumnMetadata.INSTANCE.getValueFunction(condition.getName());
+        if (function == Function.Latest) {
+            return readMetricsValues(condition, valueColumnName, duration).getValues().latestValue(defaultValue);
+        }
         final String measurement = condition.getName();
 
-        SelectionQueryImpl query = select();
-        switch (function) {
-            case Avg:
-                query.mean(valueColumnName);
-                break;
-            default:
-                query.sum(valueColumnName);
+        final SelectionQueryImpl query = select();
+        if (function == Function.Avg) {
+            query.mean(valueColumnName);
+        } else {
+            query.sum(valueColumnName);
         }
-        WhereQueryImpl<SelectQueryImpl> queryWhereQuery = query.from(client.getDatabase(), measurement).where();
+        final WhereQueryImpl<SelectQueryImpl> queryWhereQuery = query.from(client.getDatabase(), measurement).where();
 
         final String entityId = condition.getEntity().buildId();
         if (entityId != null) {
@@ -82,22 +84,22 @@ public class MetricsQuery implements IMetricsQueryDAO {
         }
 
         queryWhereQuery
-            .and(gte(InfluxClient.TIME, InfluxClient.timeInterval(duration.getStartTimeBucket())))
-            .and(lte(InfluxClient.TIME, InfluxClient.timeInterval(duration.getEndTimeBucket())))
+            .and(gte(InfluxClient.TIME, InfluxClient.timeIntervalTS(duration.getStartTimestamp())))
+            .and(lte(InfluxClient.TIME, InfluxClient.timeIntervalTS(duration.getEndTimestamp())))
             .groupBy(InfluxConstants.TagName.ENTITY_ID);
 
-        List<QueryResult.Series> seriesList = client.queryForSeries(queryWhereQuery);
+        final List<QueryResult.Series> seriesList = client.queryForSeries(queryWhereQuery);
         if (log.isDebugEnabled()) {
             log.debug("SQL: {} result set: {}", queryWhereQuery.getCommand(), seriesList);
         }
         if (CollectionUtils.isNotEmpty(seriesList)) {
             for (QueryResult.Series series : seriesList) {
                 Number value = (Number) series.getValues().get(0).get(1);
-                return value.intValue();
+                return value.longValue();
             }
         }
 
-        return ValueColumnMetadata.INSTANCE.getDefaultValue(condition.getName());
+        return defaultValue;
     }
 
     @Override
@@ -105,12 +107,10 @@ public class MetricsQuery implements IMetricsQueryDAO {
                                            final String valueColumnName,
                                            final Duration duration) throws IOException {
         final List<PointOfTime> pointOfTimes = duration.assembleDurationPoints();
-        List<String> ids = new ArrayList<>(pointOfTimes.size());
-        pointOfTimes.forEach(pointOfTime -> {
-            ids.add(pointOfTime.id(condition.getEntity().buildId()));
-        });
+        final List<String> ids = new ArrayList<>(pointOfTimes.size());
+        pointOfTimes.forEach(pointOfTime -> ids.add(pointOfTime.id(condition.getEntity().buildId())));
 
-        WhereQueryImpl<SelectQueryImpl> query = select()
+        final WhereQueryImpl<SelectQueryImpl> query = select()
             .column(ID_COLUMN)
             .column(valueColumnName)
             .from(client.getDatabase(), condition.getName())
@@ -152,12 +152,10 @@ public class MetricsQuery implements IMetricsQueryDAO {
                                                         final List<String> labels,
                                                         final Duration duration) throws IOException {
         final List<PointOfTime> pointOfTimes = duration.assembleDurationPoints();
-        List<String> ids = new ArrayList<>(pointOfTimes.size());
-        pointOfTimes.forEach(pointOfTime -> {
-            ids.add(pointOfTime.id(condition.getEntity().buildId()));
-        });
+        final List<String> ids = new ArrayList<>(pointOfTimes.size());
+        pointOfTimes.forEach(pointOfTime -> ids.add(pointOfTime.id(condition.getEntity().buildId())));
 
-        WhereQueryImpl<SelectQueryImpl> query = select()
+        final WhereQueryImpl<SelectQueryImpl> query = select()
             .column(ID_COLUMN)
             .column(valueColumnName)
             .from(client.getDatabase(), condition.getName())
@@ -170,45 +168,21 @@ public class MetricsQuery implements IMetricsQueryDAO {
                 query.where(contains(ID_COLUMN, Joiner.on("|").join(ids)));
             }
         }
-        List<QueryResult.Series> series = client.queryForSeries(query);
+        final List<QueryResult.Series> series = client.queryForSeries(query);
         if (log.isDebugEnabled()) {
             log.debug("SQL: {} result set: {}", query.getCommand(), series);
         }
 
-        Map<String, MetricsValues> labeledValues = new HashMap<>(labels.size());
-        labels.forEach(label -> {
-            MetricsValues labelValue = new MetricsValues();
-            labelValue.setLabel(label);
-
-            labeledValues.put(label, labelValue);
-        });
-
-        final int defaultValue = ValueColumnMetadata.INSTANCE.getDefaultValue(condition.getName());
+        final Map<String, DataTable> idMap = new HashMap<>();
         if (!CollectionUtils.isEmpty(series)) {
             series.get(0).getValues().forEach(values -> {
                 final String id = (String) values.get(1);
                 DataTable multipleValues = new DataTable(5);
                 multipleValues.toObject((String) values.get(2));
-
-                labels.forEach(label -> {
-                    Long data = multipleValues.get(label);
-                    if (data == null) {
-                        data = (long) defaultValue;
-                    }
-                    final IntValues intValues = labeledValues.get(label).getValues();
-                    KVInt kv = new KVInt();
-                    kv.setId(id);
-                    kv.setValue(data);
-                    intValues.addKVInt(kv);
-                });
+                idMap.put(id, multipleValues);
             });
         }
-
-        return Util.sortValues(
-            new ArrayList<>(labeledValues.values()),
-            ids,
-            defaultValue
-        );
+        return Util.composeLabelValue(condition, labels, ids, idMap);
     }
 
     @Override
@@ -216,26 +190,23 @@ public class MetricsQuery implements IMetricsQueryDAO {
                                final String valueColumnName,
                                final Duration duration) throws IOException {
         final List<PointOfTime> pointOfTimes = duration.assembleDurationPoints();
-        List<String> ids = new ArrayList<>(pointOfTimes.size());
-        pointOfTimes.forEach(pointOfTime -> {
-            ids.add(pointOfTime.id(condition.getEntity().buildId()));
-        });
+        final List<String> ids = new ArrayList<>(pointOfTimes.size());
+        pointOfTimes.forEach(pointOfTime -> ids.add(pointOfTime.id(condition.getEntity().buildId())));
 
-        WhereQueryImpl<SelectQueryImpl> query = select()
+        final WhereQueryImpl<SelectQueryImpl> query = select()
             .column(ID_COLUMN)
             .column(valueColumnName)
             .from(client.getDatabase(), condition.getName())
             .where(contains(ID_COLUMN, Joiner.on("|").join(ids)));
-        Map<String, List<Long>> thermodynamicValueMatrix = new HashMap<>();
 
-        QueryResult.Series series = client.queryForSingleSeries(query);
+        final QueryResult.Series series = client.queryForSingleSeries(query);
         if (log.isDebugEnabled()) {
             log.debug("SQL: {} result set: {}", query.getCommand(), series);
         }
 
         final int defaultValue = ValueColumnMetadata.INSTANCE.getDefaultValue(condition.getName());
 
-        HeatMap heatMap = new HeatMap();
+        final HeatMap heatMap = new HeatMap();
         if (series != null) {
             for (List<Object> values : series.getValues()) {
                 heatMap.buildColumn(values.get(1).toString(), values.get(2).toString(), defaultValue);
@@ -243,7 +214,6 @@ public class MetricsQuery implements IMetricsQueryDAO {
         }
 
         heatMap.fixMissingColumns(ids, defaultValue);
-
         return heatMap;
     }
 }

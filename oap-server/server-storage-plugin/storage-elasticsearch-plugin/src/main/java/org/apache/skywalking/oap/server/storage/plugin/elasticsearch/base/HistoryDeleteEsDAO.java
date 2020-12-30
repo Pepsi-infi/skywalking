@@ -49,7 +49,7 @@ public class HistoryDeleteEsDAO extends EsDAO implements IHistoryDeleteDAO {
                 return;
             }
         }
-        deadline = Long.valueOf(new DateTime().plusDays(0 - ttl).toString("yyyyMMdd"));
+        deadline = Long.parseLong(new DateTime().plusDays(-ttl).toString("yyyyMMdd"));
 
         List<String> indexes = client.retrievalIndexByAliases(model.getName());
 
@@ -67,7 +67,8 @@ public class HistoryDeleteEsDAO extends EsDAO implements IHistoryDeleteDAO {
             client.deleteByIndexName(prepareDeleteIndex);
         }
         String latestIndex = TimeSeriesUtils.latestWriteIndexName(model);
-        if (!leftIndices.contains(latestIndex)) {
+        String formattedLatestIndex =  client.formatIndexName(latestIndex);
+        if (!leftIndices.contains(formattedLatestIndex)) {
             client.createIndex(latestIndex);
         }
     }

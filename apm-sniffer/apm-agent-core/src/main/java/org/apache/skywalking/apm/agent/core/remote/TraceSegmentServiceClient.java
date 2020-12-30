@@ -45,7 +45,7 @@ import static org.apache.skywalking.apm.agent.core.remote.GRPCChannelStatus.CONN
 
 @DefaultImplementor
 public class TraceSegmentServiceClient implements BootService, IConsumer<TraceSegment>, TracingContextListener, GRPCChannelListener {
-    private static final ILog logger = LogManager.getLogger(TraceSegmentServiceClient.class);
+    private static final ILog LOGGER = LogManager.getLogger(TraceSegmentServiceClient.class);
 
     private long lastLogTime;
     private long segmentUplinkedCounter;
@@ -64,8 +64,7 @@ public class TraceSegmentServiceClient implements BootService, IConsumer<TraceSe
         lastLogTime = System.currentTimeMillis();
         segmentUplinkedCounter = 0;
         segmentAbandonedCounter = 0;
-        carrier = new DataCarrier<>(CHANNEL_SIZE, BUFFER_SIZE);
-        carrier.setBufferStrategy(BufferStrategy.IF_POSSIBLE);
+        carrier = new DataCarrier<>(CHANNEL_SIZE, BUFFER_SIZE, BufferStrategy.IF_POSSIBLE);
         carrier.consume(this, 1);
     }
 
@@ -102,8 +101,8 @@ public class TraceSegmentServiceClient implements BootService, IConsumer<TraceSe
                 public void onError(
                     Throwable throwable) {
                     status.finished();
-                    if (logger.isErrorEnable()) {
-                        logger.error(
+                    if (LOGGER.isErrorEnable()) {
+                        LOGGER.error(
                             throwable,
                             "Send UpstreamSegment to collector fail with a grpc internal exception."
                         );
@@ -125,7 +124,7 @@ public class TraceSegmentServiceClient implements BootService, IConsumer<TraceSe
                     upstreamSegmentStreamObserver.onNext(upstreamSegment);
                 }
             } catch (Throwable t) {
-                logger.error(t, "Transform and send UpstreamSegment to collector fail.");
+                LOGGER.error(t, "Transform and send UpstreamSegment to collector fail.");
             }
 
             upstreamSegmentStreamObserver.onCompleted();
@@ -144,11 +143,11 @@ public class TraceSegmentServiceClient implements BootService, IConsumer<TraceSe
         if (currentTimeMillis - lastLogTime > 30 * 1000) {
             lastLogTime = currentTimeMillis;
             if (segmentUplinkedCounter > 0) {
-                logger.debug("{} trace segments have been sent to collector.", segmentUplinkedCounter);
+                LOGGER.debug("{} trace segments have been sent to collector.", segmentUplinkedCounter);
                 segmentUplinkedCounter = 0;
             }
             if (segmentAbandonedCounter > 0) {
-                logger.debug(
+                LOGGER.debug(
                     "{} trace segments have been abandoned, cause by no available channel.", segmentAbandonedCounter);
                 segmentAbandonedCounter = 0;
             }
@@ -157,7 +156,7 @@ public class TraceSegmentServiceClient implements BootService, IConsumer<TraceSe
 
     @Override
     public void onError(List<TraceSegment> data, Throwable t) {
-        logger.error(t, "Try to send {} trace segments to collector, with unexpected exception.", data.size());
+        LOGGER.error(t, "Try to send {} trace segments to collector, with unexpected exception.", data.size());
     }
 
     @Override
@@ -171,8 +170,8 @@ public class TraceSegmentServiceClient implements BootService, IConsumer<TraceSe
             return;
         }
         if (!carrier.produce(traceSegment)) {
-            if (logger.isDebugEnable()) {
-                logger.debug("One trace segment has been abandoned, cause by buffer is full.");
+            if (LOGGER.isDebugEnable()) {
+                LOGGER.debug("One trace segment has been abandoned, cause by buffer is full.");
             }
         }
     }

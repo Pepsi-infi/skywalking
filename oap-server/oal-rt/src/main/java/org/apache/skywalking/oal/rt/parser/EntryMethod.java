@@ -20,13 +20,12 @@ package org.apache.skywalking.oal.rt.parser;
 
 import java.util.ArrayList;
 import java.util.List;
-import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.Setter;
 import org.apache.skywalking.oal.rt.util.ClassMethodUtil;
 
-@Getter(AccessLevel.PUBLIC)
-@Setter(AccessLevel.PUBLIC)
+@Getter
+@Setter
 public class EntryMethod {
     static final int LITERAL_TYPE = 1;
     static final int IDENTIFIER_TYPE = 2;
@@ -38,7 +37,8 @@ public class EntryMethod {
 
     void addArg(Class<?> parameterType, Argument arg) {
         if (arg.getType() == LITERAL_TYPE) {
-            addArg(parameterType, arg.getType(), arg.getText());
+            // As literal type, there is always one element.
+            addArg(parameterType, arg.getType(), arg.getText().get(0));
             return;
         }
         addArg(parameterType, arg.getType(), parameterType.equals(boolean.class) ? "source." + ClassMethodUtil.toIsMethod(arg

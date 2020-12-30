@@ -60,8 +60,8 @@ public class AlarmQuery implements IAlarmQueryDAO {
             .from(client.getDatabase(), AlarmRecord.INDEX_NAME)
             .where();
         if (startTB > 0 && endTB > 0) {
-            recallQuery.and(gte(InfluxClient.TIME, InfluxClient.timeInterval(startTB)))
-                       .and(lte(InfluxClient.TIME, InfluxClient.timeInterval(endTB)));
+            recallQuery.and(gte(InfluxClient.TIME, InfluxClient.timeIntervalTB(startTB)))
+                       .and(lte(InfluxClient.TIME, InfluxClient.timeIntervalTB(endTB)));
         }
         if (!Strings.isNullOrEmpty(keyword)) {
             recallQuery.and(contains(AlarmRecord.ALARM_MESSAGE, keyword.replaceAll("/", "\\\\/")));
@@ -73,9 +73,7 @@ public class AlarmQuery implements IAlarmQueryDAO {
         WhereQueryImpl<SelectQueryImpl> countQuery = select().count(AlarmRecord.ID0)
                                                              .from(client.getDatabase(), AlarmRecord.INDEX_NAME)
                                                              .where();
-        recallQuery.getClauses().forEach(clause -> {
-            countQuery.where(clause);
-        });
+        recallQuery.getClauses().forEach(countQuery::where);
 
         Query query = new Query(countQuery.getCommand() + recallQuery.getCommand());
         List<QueryResult.Result> results = client.query(query);
@@ -99,7 +97,7 @@ public class AlarmQuery implements IAlarmQueryDAO {
               .sorted((a, b) -> Long.compare((long) b.get(1), (long) a.get(1)))
               .skip(from)
               .forEach(values -> {
-                  final int sid = (int) values.get(4);
+                  final int sid = ((Number) values.get(4)).intValue();
                   Scope scope = Scope.Finder.valueOf(sid);
 
                   AlarmMessage message = new AlarmMessage();

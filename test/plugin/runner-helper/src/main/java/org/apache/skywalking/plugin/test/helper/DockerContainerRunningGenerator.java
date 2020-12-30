@@ -19,13 +19,12 @@ package org.apache.skywalking.plugin.test.helper;
 
 import java.io.StringWriter;
 import java.lang.invoke.MethodHandles;
-import java.util.HashMap;
 import java.util.Map;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 public class DockerContainerRunningGenerator extends AbstractRunningGenerator {
-    private static final Logger logger = LogManager.getLogger(MethodHandles.lookup().lookupClass());
+    private static final Logger LOGGER = LogManager.getLogger(MethodHandles.lookup().lookupClass());
 
     protected DockerContainerRunningGenerator() {
     }
@@ -43,7 +42,7 @@ public class DockerContainerRunningGenerator extends AbstractRunningGenerator {
         try {
             cfg.getTemplate("container-start-script.template").process(root, out);
         } catch (Exception e) {
-            logger.error("Failed to generate running script.", e);
+            LOGGER.error("Failed to generate running script.", e);
         }
         return out.toString();
     }
