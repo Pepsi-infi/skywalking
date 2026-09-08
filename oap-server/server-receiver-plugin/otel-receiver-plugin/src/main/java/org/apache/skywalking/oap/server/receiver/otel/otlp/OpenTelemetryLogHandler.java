@@ -1,0 +1,208 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+package org.apache.skywalking.oap.server.receiver.otel.otlp;
+
+import com.google.common.base.Strings;
+import io.grpc.stub.StreamObserver;
+import io.opentelemetry.proto.collector.logs.v1.ExportLogsServiceRequest;
+import io.opentelemetry.proto.collector.logs.v1.ExportLogsServiceResponse;
+import io.opentelemetry.proto.collector.logs.v1.LogsServiceGrpc;
+import io.opentelemetry.proto.common.v1.KeyValue;
+import io.opentelemetry.proto.logs.v1.LogRecord;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import lombok.Getter;
+import org.apache.skywalking.apm.network.common.v3.KeyStringValuePair;
+import org.apache.skywalking.apm.network.logging.v3.LogData;
+import org.apache.skywalking.apm.network.logging.v3.LogDataBody;
+import org.apache.skywalking.apm.network.logging.v3.LogTags;
+import org.apache.skywalking.apm.network.logging.v3.TextLog;
+import org.apache.skywalking.oap.server.core.source.LogMetadataUtils;
+import org.apache.skywalking.oap.log.analyzer.v2.module.LogAnalyzerModule;
+import org.apache.skywalking.oap.log.analyzer.v2.provider.log.ILogAnalyzerService;
+import com.linecorp.armeria.common.HttpMethod;
+import java.util.Collections;
+import org.apache.skywalking.oap.server.core.server.GRPCHandlerRegister;
+import org.apache.skywalking.oap.server.core.server.HTTPHandlerRegister;
+import org.apache.skywalking.oap.server.library.module.ModuleManager;
+import org.apache.skywalking.oap.server.library.module.ModuleStartException;
+import org.apache.skywalking.oap.server.receiver.otel.Handler;
+import org.apache.skywalking.oap.server.receiver.otel.OtelMetricReceiverConfig;
+import org.apache.skywalking.oap.server.receiver.sharing.server.SharingServerModule;
+import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
+import org.apache.skywalking.oap.server.telemetry.api.HistogramMetrics;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsCreator;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsTag;
+
+import java.util.Map;
+import java.util.stream.Collectors;
+
+import static java.util.stream.Collectors.toMap;
+
+@Slf4j
+@RequiredArgsConstructor
+public class OpenTelemetryLogHandler
+    extends LogsServiceGrpc.LogsServiceImplBase
+    implements Handler {
+    private ModuleManager manager;
+
+    private ILogAnalyzerService logAnalyzerService;
+
+    @Getter(lazy = true)
+    private final MetricsCreator metricsCreator = manager.find(TelemetryModule.NAME).provider().getService(MetricsCreator.class);
+
+    @Getter(lazy = true)
+    private final HistogramMetrics processHistogram = getMetricsCreator().createHistogramMetric(
+        "otel_logs_latency",
+        "The latency to process the logs request",
+        MetricsTag.EMPTY_KEY,
+        MetricsTag.EMPTY_VALUE
+    );
+
+    @Override
+    public void init(ModuleManager manager, OtelMetricReceiverConfig config) {
+        this.manager = manager;
+    }
+
+    @Override
+    public String type() {
+        return "otlp-logs";
+    }
+
+    @Override
+    public void active() throws ModuleStartException {
+        GRPCHandlerRegister grpcHandlerRegister = manager.find(SharingServerModule.NAME)
+                                                         .provider()
+                                                         .getService(GRPCHandlerRegister.class);
+        grpcHandlerRegister.addHandler(this);
+
+        HTTPHandlerRegister httpHandlerRegister = manager.find(SharingServerModule.NAME)
+                                                         .provider()
+                                                         .getService(HTTPHandlerRegister.class);
+        httpHandlerRegister.addHandler(
+            new OpenTelemetryLogHTTPHandler(this),
+            Collections.singletonList(HttpMethod.POST));
+    }
+
+    @Override
+    public void export(ExportLogsServiceRequest request, StreamObserver<ExportLogsServiceResponse> responseObserver) {
+        processExport(request);
+        responseObserver.onNext(ExportLogsServiceResponse.getDefaultInstance());
+        responseObserver.onCompleted();
+    }
+
+    /**
+     * Process an OTLP log export request. Shared by both gRPC and HTTP handlers.
+     */
+    void processExport(ExportLogsServiceRequest request) {
+        request.getResourceLogsList().forEach(resourceLogs -> {
+            final var resource = resourceLogs.getResource();
+            final var attributes = resource
+                .getAttributesList().stream()
+                .map(it -> Map.entry(it.getKey(), buildTagValue(it)))
+                .collect(toMap(Map.Entry::getKey, Map.Entry::getValue));
+            final var service = attributes.get("service.name");
+            if (Strings.isNullOrEmpty(service)) {
+                log.warn("No service name found in resource attributes, discarding the log");
+                return;
+            }
+            final var layer = attributes.getOrDefault("service.layer", "");
+            // service.instance.id is the OTel standard resource attribute for instance identity
+            // https://opentelemetry.io/docs/specs/semconv/resource/#service
+            // Fall back to service.instance for backward compatibility
+            final var instanceId = attributes.getOrDefault("service.instance.id", "");
+            final var serviceInstance = instanceId.isEmpty()
+                ? attributes.getOrDefault("service.instance", "")
+                : instanceId;
+
+            resourceLogs
+                .getScopeLogsList()
+                .stream()
+                .flatMap(it -> it.getLogRecordsList().stream())
+                .forEach(logRecord -> {
+                    try (final var timer = getProcessHistogram().createTimer()) {
+                        doAnalysisQuietly(service, layer, serviceInstance, attributes, logRecord);
+                    }
+                });
+        });
+    }
+
+    private void doAnalysisQuietly(String service, String layer, String serviceInstance,
+                                   Map<String, String> resourceAttributes, LogRecord logRecord) {
+        try {
+            final LogData.Builder builder = LogData
+                .newBuilder()
+                .setService(service)
+                .setServiceInstance(serviceInstance)
+                .setTimestamp(logRecord.getTimeUnixNano() / 1_000_000)
+                .setTags(buildTags(logRecord))
+                .setBody(buildBody(logRecord))
+                .setLayer(layer);
+            logAnalyzerService().doAnalysis(
+                LogMetadataUtils.fromLogData(builder, resourceAttributes), builder);
+        } catch (Exception e) {
+            log.error("Failed to analyze logs", e);
+        }
+    }
+
+    private static LogDataBody buildBody(LogRecord logRecord) {
+        return LogDataBody.newBuilder().setText(
+            TextLog.newBuilder().setText(
+                logRecord.getBody().getStringValue()
+            ).build()
+        ).build();
+    }
+
+    private LogTags buildTags(LogRecord logRecord) {
+        return LogTags.newBuilder().addAllData(
+            logRecord
+                .getAttributesList()
+                .stream()
+                .collect(toMap(KeyValue::getKey, this::buildTagValue))
+                .entrySet()
+                .stream()
+                .map(it -> KeyStringValuePair
+                    .newBuilder()
+                    .setKey(it.getKey())
+                    .setValue(it.getValue())
+                    .build())
+                .collect(Collectors.toList())
+        ).build();
+    }
+
+    private String buildTagValue(KeyValue it) {
+        final var value = it.getValue();
+        return value.hasStringValue() ? value.getStringValue() :
+            value.hasIntValue() ? String.valueOf(value.getIntValue()) :
+                value.hasDoubleValue() ? String.valueOf(value.getDoubleValue()) :
+                    value.hasBoolValue() ? String.valueOf(value.getBoolValue()) :
+                        value.hasArrayValue() ? value.getArrayValue().toString() :
+                            "";
+    }
+
+    private ILogAnalyzerService logAnalyzerService() {
+        if (logAnalyzerService == null) {
+            logAnalyzerService =
+                manager.find(LogAnalyzerModule.NAME)
+                       .provider()
+                       .getService(ILogAnalyzerService.class);
+        }
+        return logAnalyzerService;
+    }
+}

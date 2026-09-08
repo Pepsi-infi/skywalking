@@ -1,0 +1,409 @@
+# LAL Compiler
+
+Compiles LAL (Log Analysis Language) scripts into `LalExpression` implementation classes at runtime using ANTLR4 parsing and Javassist bytecode generation.
+
+## Compilation Workflow
+
+```
+LAL DSL string
+  → LALScriptParser.parse(dsl)                 [ANTLR4 lexer/parser → listener]
+  → LALScriptModel (immutable AST)
+  → LALClassGenerator.compileFromModel(model)
+      1. detectParserType(model)     — compile-time data source analysis (JSON/YAML/TEXT/NONE)
+      2. generateExecuteMethod()     — emit execute() + private methods (_extractor, _sink)
+      3. classPool.makeClass()       — single class implementing LalExpression
+      4. addLocalVariableTable()     — named LVT entries for all methods
+      5. ctClass.toClass()           — load into JVM
+  → LalExpression instance
+```
+
+The generated class implements:
+```java
+void execute(FilterSpec filterSpec, ExecutionContext ctx)
+```
+
+## File Structure
+
+```
+oap-server/analyzer/log-analyzer/
+  src/main/antlr4/.../LALLexer.g4       — ANTLR4 lexer grammar
+  src/main/antlr4/.../LALParser.g4      — ANTLR4 parser grammar
+
+  src/main/java/.../compiler/
+    LALScriptParser.java                — ANTLR4 facade: DSL string → AST
+    LALScriptModel.java                 — Immutable AST model classes
+    LALClassGenerator.java              — Public API, execute method codegen, class scaffolding
+    LALBlockCodegen.java                — Extractor/sink/condition/value-access codegen
+    LALCodegenHelper.java               — Static utility methods and shared constants
+    rt/
+      LalExpressionPackageHolder.java   — Class loading anchor (empty marker)
+      LalRuntimeHelper.java             — Instance-based helper called by generated code
+
+  src/main/java/.../dsl/
+    LalExpression.java                  — Functional interface: execute(FilterSpec, ExecutionContext)
+    ExecutionContext.java               — Per-log execution state (metadata, input, parsed, flags)
+    DSL.java                            — Wraps compiled expression + FilterSpec
+    spec/filter/FilterSpec.java         — Top-level filter spec (all methods take ctx explicitly)
+    spec/extractor/MetricExtractor.java   — Handles LAL metrics {} blocks (prepare/submit samples to MAL)
+    spec/sink/SinkSpec.java             — Sink spec (save/drop/sample)
+    spec/sink/SamplerSpec.java          — Rate-limit sampler
+
+  src/test/java/.../compiler/
+    LALScriptParserTest.java            — 19 parser tests
+    LALClassGeneratorTestBase.java      — shared base: fresh generator per test, .class output, naming
+    LALClassGeneratorBasicTest.java     — 10 tests: minimal compile, parsers, source gen, errors
+    LALClassGeneratorConditionTest.java — 10 tests: tag(), safe-nav, if-blocks, else-if
+    LALClassGeneratorExtractorTest.java — 10 tests: ProcessRegistry, metrics, inputType, outputType
+    LALClassGeneratorDefTest.java       — 7 tests: def variables, toJson/toJsonArray
+    LALClassGeneratorSinkTest.java      — 5 tests: sampler, rateLimit, interpolated IDs
+    LALExpressionExecutionTest.java     — 25+ data-driven execution tests (from YAML + .data.yaml)
+```
+
+## Package & Class Naming
+
+All v2 classes live under `org.apache.skywalking.oap.log.analyzer.v2.*` to avoid FQCN conflicts with the v1 (Groovy) classes.
+
+| Component | Package / Name |
+|-----------|---------------|
+| Parser/Model/Generator | `org.apache.skywalking.oap.log.analyzer.v2.compiler` |
+| Generated classes | `org.apache.skywalking.oap.log.analyzer.v2.compiler.rt.{yamlName}_L{lineNo}_{ruleName}` |
+| Package holder | `org.apache.skywalking.oap.log.analyzer.v2.compiler.rt.LalExpressionPackageHolder` |
+| Runtime helper | `org.apache.skywalking.oap.log.analyzer.v2.compiler.rt.LalRuntimeHelper` |
+| Functional interface | `org.apache.skywalking.oap.log.analyzer.v2.dsl.LalExpression` |
+
+Class names are built from `yamlSource` (file name + line number) and `classNameHint` (rule name).
+Example: `default_L3_default` (rule `default` at line 3 of `lal/default.yaml`). `sourcePath` carries the `lal/` catalog for `SourceFile`, but `DslClassNaming.stem` is told to drop it (`LALConfigs.LAL_CATALOG`): the generated class's package already identifies the DSL and LAL has no second catalog to disambiguate against.
+Falls back to `LalExpr_<N>` (global counter) when no hint is set.
+
+## Single Class with Private Methods
+
+The generator produces a single class per LAL script. Extractor and sink blocks become private methods called directly from `execute()` — no Consumer classes, no callback indirection.
+
+Method naming: `_extractor`, `_extractor_2`, `_extractor_3` (no `_0` suffix for single methods).
+
+Sub-blocks (metrics, sampler, rateLimit) are inlined within their parent method.
+
+Note: `slowSql` and `sampledTrace` sub-DSLs have been removed from the grammar. Custom output
+fields are now handled via the `outputType` mechanism with `outputFieldStatement` grammar rule.
+
+## Explicit Context Passing (No ThreadLocal)
+
+All spec methods take `ExecutionContext ctx` as an explicit parameter — there is no `BINDING` ThreadLocal or `bind()` method. The `execute()` method receives `ctx` directly and passes it through:
+
+- `execute(FilterSpec filterSpec, ExecutionContext ctx)` — entry point
+- `filterSpec.json(ctx, true)`, `filterSpec.text(ctx)`, `filterSpec.sink(ctx)` — parser/sink calls (json/yaml/text-regexp carry the rule's `abortOnFailure` flag)
+- `((OutputType) h.ctx().output()).setService(...)` — standard field setters on the output builder
+- `_e.prepareMetrics(h.ctx())`, `_e.submitMetrics(h.ctx(), _metrics)` — metrics calls via MetricExtractor
+- `_f.sampler().rateLimit(h.ctx(), ...)` — sink calls via `h.ctx()`
+
+The generated `execute()` method guards `_extractor()` and `_sink()` calls with `if (!ctx.shouldAbort())`, matching v1 Groovy behavior where `extractor {}` and `sink {}` closures check the abort flag before running their body. `finalizeSink(ctx)` also checks the flag. Individual spec methods inside each block additionally check `ctx.shouldAbort()` as a defense-in-depth measure.
+
+## LocalVariableTable (LVT)
+
+All generated methods include a `LocalVariableTable` attribute for debugger/decompiler readability. Without LVT, tools show `var0`, `var1`, `var2`, `var3` instead of named variables.
+
+| Method | Slot 0 | Slot 1 | Slot 2 | Slot 3 |
+|--------|--------|--------|--------|--------|
+| `execute()` | `this` | `filterSpec` | `ctx` | `h` |
+| `_extractor()` | `this` | `_e` | `h` | — |
+| `_sink()` | `this` | `_f` | `h` | — |
+
+LVT entries are added via `PrivateMethod` inner class which carries both source code and variable descriptors.
+
+## Local Variables (`def`)
+
+The `def` keyword declares local variables in the extractor (or filter level). The grammar rule:
+
+```
+defStatement: DEF IDENTIFIER ASSIGN valueAccess typeCast? ;
+```
+
+The optional `typeCast` supports built-in types (`String`, `Long`, `Integer`, `Boolean`) and
+fully qualified class names (`as com.example.MyType`). The FQCN is resolved via `Class.forName()`
+at compile time. If not found, compilation fails with `IllegalArgumentException`.
+
+### Type inference
+
+The variable type is inferred from the initializer expression:
+
+| Initializer | Inferred type | Generated code |
+|---|---|---|
+| `toJson(expr)` | `JsonObject` | `h.toJsonObject(expr)` |
+| `toJsonArray(expr)` | `JsonArray` | `h.toJsonArray(expr)` |
+| General value access | Last resolved type via reflection | Standard value access codegen |
+
+Built-in functions are registered in `BUILTIN_FUNCTIONS` map in `LALBlockCodegen`.
+
+### Chained def variables
+
+A `def` variable can be initialized from another `def` variable's method chain:
+
+```
+def jwt = toJson(parsed?.commonProperties?.metadata?.filterMetadataMap?.get("envoy.filters.http.jwt_authn"))
+def payload = jwt?.getAsJsonObject("payload")
+tag 'email': payload?.get("email")?.getAsString()
+```
+
+The general value access path in `generateDefStatement()` recognizes `jwt` as a def variable,
+delegates to `generateDefVarChain()` which uses reflection to resolve the chain, and
+`genCtx.lastResolvedType` captures the resolved type (`JsonObject` in this case).
+
+### Runtime helpers
+
+`LalRuntimeHelper` provides `toJsonObject()` and `toJsonArray()` overloads:
+
+| Method | Input type | Conversion |
+|---|---|---|
+| `toJsonObject(String)` | JSON string | `JsonParser.parseString().getAsJsonObject()` |
+| `toJsonObject(Map)` | Map (from JSON/YAML parser) | Recursive Gson conversion |
+| `toJsonObject(Struct)` | Protobuf `Struct` | Recursive field conversion preserving nested structures |
+| `toJsonObject(Object)` | Any (fallback) | Delegates to above based on runtime type |
+| `toJsonArray(String)` | JSON array string | `JsonParser.parseString().getAsJsonArray()` |
+| `toJsonArray(Object)` | Any (fallback) | String fallback |
+
+All methods return `null` for `null` input (null-safe).
+
+### Code generation
+
+Def variables are stored in `genCtx.localVars` map (name → `LocalVarInfo` with Java variable name
+and resolved type). Variable declarations are emitted at method top via `genCtx.localVarDecls`;
+assignments are emitted at the point where `def` appears in the DSL.
+
+Java variable names use the user-chosen name with a `_def_` prefix (e.g., `def config` → `_def_config`).
+Re-defining the same name reassigns the existing variable without creating a new declaration.
+LVT entries are added for debugger visibility.
+
+## Compile-Time Data Source Analysis
+
+The generator detects the parser type from the AST at compile time and generates typed value access:
+
+| Parser Type | LAL Example | Generated Code |
+|---|---|---|
+| JSON/YAML | `parsed.service` | `h.mapVal("service")` |
+| JSON/YAML nested | `parsed.a.b` | `h.mapVal("a", "b")` |
+| TEXT (regexp) | `parsed.level` | `h.group("level")` |
+| NONE + inputType | `parsed.response.code` | `((InputType) h.ctx().input()).getResponse().getCode()` |
+| NONE + no inputType | `parsed.service` | `h.ctx().metadata().getService()` (LogMetadata fallback) |
+| log fields (metadata) | `log.service` | `h.ctx().metadata().getService()` |
+| log fields (LogData) | `log.body` | `((LogData.Builder) h.ctx().input()).getBody()` |
+| log trace | `log.traceContext.traceId` | `h.ctx().metadata().getTraceContext().getTraceId()` |
+| tags | `tag("KEY")` | `h.tagValue("KEY")` |
+| source attrs | `sourceAttribute("os.name")` | `h.sourceAttributeValue("os.name")` |
+
+### `layer: auto` Mode
+
+Rules with `layer: auto` match logs where `service.layer` is absent (empty). Stored in
+`LogFilterListener.Factory.autoDsls` (separate from the layer-keyed `dsls` map). At runtime,
+`LogAnalyzer.doAnalysis()` routes empty-layer logs to auto rules via `createAnalysisListeners(null)`.
+
+The `autoLayerMode` flag on `ExecutionContext` triggers a layer check in `FilterSpec.doSink()`:
+if the extractor didn't set a layer, the log is warned and dropped.
+
+### inputType and LALSourceTypeProvider SPI
+
+For LAL rules with no DSL parser (`json{}`/`yaml{}`/`text{}`), the compiler needs a type to generate direct getter calls on `parsed.*` fields. Per-rule resolution order:
+
+1. **DSL parser** (`json{}`, `yaml{}`, `text{}`) — parser wins, inputType is ignored
+2. **Explicit `inputType`** in YAML rule config — FQCN string, resolved via `Class.forName()`
+3. **`LALSourceTypeProvider` SPI** — default inputType for a layer, discovered via `ServiceLoader`
+4. **`LogMetadata` fallback** — if none of the above, `parsed.*` generates getter chains on `LogMetadata` with compile-time reflection validation. Fields not found on `LogMetadata` cause `IllegalArgumentException` at boot.
+
+The SPI interface is in `org.apache.skywalking.oap.log.analyzer.v2.spi.LALSourceTypeProvider`. Receiver plugins implement it and register in `META-INF/services/`. Example: `EnvoyHTTPLALSourceTypeProvider` registers `HTTPAccessLogEntry` for `Layer.MESH`.
+
+Resolution is per-rule, not per-file.
+
+### outputType — Configurable Output Entity
+
+The output entity type (`AbstractLog` subclass) produced by the LAL sink. Resolution order:
+
+1. **Per-rule YAML config** `outputType` field — FQCN string, highest priority
+2. **`LALSourceTypeProvider` SPI** `outputType()` — default for a layer
+3. **`Log.class`** — fallback if not specified anywhere
+
+inputType is per-layer (all rules share the same input proto), but outputType is per-rule
+(different rules in the same layer may produce different output types).
+
+### Output Field Assignments
+
+Custom fields specific to the output subclass are set via `outputFieldStatement` in the extractor:
+
+```
+extractor {
+  statement parsed.statement as String    // output field — direct setter on output object
+  latency parsed.latency as Long          // output field
+  service parsed.service as String        // standard field — direct setter on output builder
+}
+```
+
+Unknown identifiers in the extractor (not `service`, `instance`, `endpoint`, `layer`, etc.)
+are parsed as `OutputFieldAssignment`. The compiler generates direct setter calls:
+`((OutputType) h.ctx().output()).setFieldName(value)`.
+
+**Output object creation**: The generated `execute()` method creates the output object at the
+start: `h.ctx().setOutput(new OutputType())`. This happens before the extractor runs, so
+output fields are set directly via typed setter calls — no reflection.
+
+**Compile-time validation**: `outputType` must be set for output field assignments. The compiler
+validates that a matching setter exists on the output type class (e.g., `setStatement(String)`).
+If no setter is found, compilation fails with an `IllegalArgumentException` at boot.
+
+**Runtime dispatch**: `RecordSinkListener.parse()` reads the output object from
+`ExecutionContext.output()` (already populated by generated code), calls
+`init(metadata, input, moduleManager)` to populate standard fields and resolve
+services (e.g., `NamingControl`, `ConfigService`) from `ModuleManager`, then `build()`
+dispatches via `complete(sourceReceiver)`. Each builder caches resolved services in
+static fields so `ModuleManager` lookups only happen once.
+
+Note: `slowSql {}` and `sampledTrace {}` sub-DSLs were removed. Custom output types use
+the `outputType` + output field mechanism instead of dedicated DSL blocks.
+
+## Example
+
+**Input**: `filter { json {} extractor { service parsed.service as String } sink {} }`
+
+One class is generated (e.g., `default_L3_my_rule` when `yamlSource=default.yaml:3`):
+
+```java
+public class default_L3_my_rule implements LalExpression {
+    public void execute(FilterSpec filterSpec, ExecutionContext ctx) {
+        LalRuntimeHelper h = new LalRuntimeHelper(ctx);
+        filterSpec.json(ctx, true);
+        if (!ctx.shouldAbort()) {
+            _extractor(filterSpec.extractor(), h);
+        }
+        filterSpec.sink(ctx);
+    }
+    private void _extractor(MetricExtractor _e, LalRuntimeHelper h) {
+        ((LogBuilder) h.ctx().output()).setService(h.toStr(h.mapVal("service")));
+    }
+}
+```
+
+## Runtime Helper (LalRuntimeHelper)
+
+Instance-based helper created at the start of `execute()`, holds the `ExecutionContext`.
+
+**Data source methods:**
+- `mapVal(key)`, `mapVal(k1, k2)`, `mapVal(k1, k2, k3)` — JSON/YAML map access
+- `group(name)` — text regexp named group
+- `tagValue(key)` — log tag lookup (persistent, from LogData tags)
+- `sourceAttributeValue(key)` — source context lookup (non-persistent, from `LogMetadata.sourceAttributes`)
+- `ctx()` — access to ExecutionContext (for `h.ctx().metadata()` and `h.ctx().log()` getters)
+
+**Type conversion:** `toStr()`, `toLong()`, `toInt()`, `toBool()`
+
+**Boolean evaluation:** `isTrue()`, `isNotEmpty()`
+
+**Safe navigation:** `toString()`, `trim()`
+
+## JSON/YAML Metadata Field Population
+
+When `json{}` or `yaml{}` parses the log body, `FilterSpec` also adds `LogMetadata` fields
+(`service`, `serviceInstance`, `endpoint`, `layer`, `timestamp`) to the parsed map via
+`putIfAbsent`. Body-parsed values take priority; metadata fields serve as fallback. This matches
+v1 Groovy `Binding.Parsed.getAt(key)` behavior where `parsed.service` falls back to
+`LogData.getService()` when the JSON body doesn't contain a `service` key.
+
+## Null-Safe String Conversion
+
+Generated code calls `h.toStr()` instead of `String.valueOf()` for casting parsed values to String.
+This preserves Java `null` for missing fields (matching Groovy's `null as String` → `null` behavior),
+whereas `String.valueOf(null)` would produce the string `"null"`.
+
+## Data-Driven Execution Tests
+
+`LALExpressionExecutionTest` loads LAL rules from YAML and mock input from `.input.data` files:
+
+```
+oap-server/analyzer/dsl-scripts-test/src/test/resources/scripts/lal/test-lal/
+  oap-cases/                     — copies of shipped LAL configs (each with .input.data)
+  feature-cases/
+    execution-basic.yaml         — 16 LAL feature-coverage rules
+    execution-basic.data.yaml    — mock input + expected output per rule
+```
+
+Each `.input.data` entry specifies `body-type`, `body`, optional `tags`, and `expect` assertions
+(service, instance, endpoint, layer, tags, abort, save, timestamp).
+
+## LAL Input Data Mock Principles
+
+LAL test data lives in `.input.data` files alongside rule YAML files under `oap-server/analyzer/dsl-scripts-test/src/test/resources/scripts/lal/`. Each entry describes one log to process and the expected output.
+
+### Input Entry Structure
+
+```yaml
+rule-name:
+  - service: test-svc               # LogData.service
+    instance: test-inst              # LogData.serviceInstance (optional)
+    body-type: json|yaml|text|none   # How to parse the body
+    body: '{"key": "value"}'         # Log body string
+    trace-id: trace-001              # Trace context (optional)
+    timestamp: 1609459200000         # LogData.timestamp (optional)
+    tags:                            # LogData tags (optional)
+      LOG_KIND: NET_PROFILING_SAMPLED_TRACE
+    extra-log:                       # For proto-typed rules (e.g., envoy-als)
+      proto-class: io.envoyproxy.envoy.data.accesslog.v3.HTTPAccessLogEntry
+      proto-json: '{"response":{"responseCode":500}}'
+    expect:                          # Expected output assertions
+      save: true                     # SinkSpec.save() called
+      abort: false                   # Not aborted
+      service: expected-svc          # Extracted service name
+      layer: MESH                    # Extracted layer
+      tag.status.code: "500"         # Extracted tag value
+```
+
+### Principles
+
+1. **`body-type` determines parsing**: `json` → `json{}` block, `text` → `text{}` block, `none` → typed proto input or LogMetadata fallback.
+2. **`extra-log` for proto types**: When rules access `parsed.*` on protobuf types (e.g., `HTTPAccessLogEntry`), provide `proto-class` and `proto-json`. The test harness parses via `JsonFormat`.
+3. **`expect` section is mandatory**: Every entry must have `expect` with at least `save` and `abort`.
+4. **Tag assertions**: `tag.KEY` in expect asserts extracted tag values (e.g., `tag.status.code: "500"`).
+5. **v1 is the truth**: Both v1 (Groovy) and v2 (ANTLR4) must produce identical results. If v1 produces different output than expected, the expected data has a bug.
+
+### Directory Structure
+
+```
+oap-server/analyzer/dsl-scripts-test/src/test/resources/scripts/lal/test-lal/
+  oap-cases/                     — copies of shipped LAL configs
+    default.yaml / default.input.data
+    envoy-als.yaml / envoy-als.input.data
+    ...
+  feature-cases/
+    execution-basic.yaml / execution-basic.input.data  — LAL feature tests
+```
+
+## Debug Output
+
+When `SW_DYNAMIC_CLASS_ENGINE_DEBUG=true` environment variable is set, generated `.class` files are written to disk for inspection. Each `.class` is paired with a `<ClassName>.java` generated source file — the verbatim Java source the codegen fed Javassist:
+
+```
+{skywalking}/lal-rt/
+  *.class          - Generated LalExpression .class files
+  *.java           - Javassist compile input (synthetic; for IDE source-attach)
+```
+
+The `.java` generated source file exists so IDE source-attach renders the actual codegen input directly without relying on FernFlower / a decompiler. Javassist-emitted bytecode often confuses decompilers (no `goto` consolidation, slot reuse with mixed types, debug-injected `if (gate.isGateOn()) { ... }` chains), and FernFlower frequently bails to "compiled code" stubs. The source-attach path always works and shows the EXACT code Javassist compiled — gate field, probe call sites, the `_extractor()` / `_sink()` private methods, the lot.
+
+When `SW_DSL_DEBUGGING_INJECTION_ENABLED=true` is also set, the codegen emits the per-rule `GateHolder debug` field plus `LALDebug.captureXxx(...)` probe sites at every block / per-statement boundary. Both `.class` and `.java` reflect the with-debug shape. The two env vars are independent: `SW_DYNAMIC_CLASS_ENGINE_DEBUG` controls disk dump; `SW_DSL_DEBUGGING_INJECTION_ENABLED` controls codegen branch. In tests, use `setClassOutputDir(dir)` instead.
+
+## Testing Framework (server-testing module)
+
+Test utilities from `org.apache.skywalking.oap.server.testing.dsl`:
+
+- `DslClassOutput.unitTestDir("lal")` — output dir for unit tests (`target/lal-generated-classes/`)
+- `DslClassOutput.checkerTestDir(sourceFile)` — output dir for checker tests (`{baseName}.generated-classes/`)
+- `LalRuleLoader.loadAllRules(Path)` — loads all LAL rules with companion `.input.data` or `.data.yaml`
+- `LalLogDataBuilder.buildLogData(Map)` — builds `LogData.Builder` from test input map
+- `LalLogDataBuilder.buildSyntheticLogData(String)` — builds synthetic LogData from DSL string
+- `LalLogDataBuilder.buildExtraLog(Map)` — builds proto Message for typed input from input map
+- `DslRuleLoader.findScriptsDir(String...)` — resolves scripts directory from candidates
+- `DslRuleLoader.findRuleLine(String[], String, int)` — finds 1-based line number of rule in YAML
+
+Used by `LALClassGeneratorTestBase`, `LALExpressionExecutionTest`, `LalComparisonTest`, and `EnvoyAlsLalTest`.
+
+## Dependencies
+
+All within this module (grammar, compiler, and runtime are merged):
+- ANTLR4 grammar → generates lexer/parser at build time
+- `LalExpression`, `ExecutionContext`, `FilterSpec`, all Spec classes — in `dsl` package of this module
+- `javassist` — bytecode generation

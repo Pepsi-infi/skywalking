@@ -14,43 +14,116 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-version: '3.3'
 services:
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:${ES_TAG}
+    profiles:
+      - "elasticsearch"
+    image: ${ELASTICSEARCH_IMAGE:-docker.elastic.co/elasticsearch/elasticsearch-oss:7.4.2}
     container_name: elasticsearch
-    restart: always
     ports:
-      - 9200:9200
+      - "9200:9200"
+    networks:
+      - demo
+    healthcheck:
+      test: [ "CMD-SHELL", "curl --silent --fail localhost:9200/_cluster/health || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     environment:
-      discovery.type: single-node
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
     ulimits:
       memlock:
         soft: -1
         hard: -1
-  oap:
-    image: skywalking/oap:${TAG}
+
+  banyandb:
+    profiles:
+      - "banyandb"
+    image: ${BANYANDB_IMAGE}
+    container_name: banyandb
+    networks:
+      - demo
+    expose:
+      - 17912
+    ports:
+      - 17913:17913
+    command: standalone --stream-root-path /tmp/stream-data --measure-root-path /tmp/measure-data
+    healthcheck:
+      test: [ "CMD", "sh", "-c", "nc -nz 127.0.0.1 17912" ]
+      interval: 5s
+      timeout: 60s
+      retries: 120
+
+  oap-base: &oap-base
+    profiles: [ "none" ]
+    image: ${OAP_IMAGE:-ghcr.io/apache/skywalking/oap:latest}
+    ports:
+      - "11800:11800"
+      - "12800:12800"
+      - "17128:17128"
+    networks:
+      - demo
+    healthcheck:
+      # The OAP image (eclipse-temurin JRE) ships bash but no curl/wget/nc,
+      # so probe the query port with bash's built-in /dev/tcp instead.
+      test: [ "CMD", "bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/12800" ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      # OAP can take 60-120s to boot (BanyanDB schema install); don't count
+      # failures against the retry budget during that window.
+      start_period: 90s
+    environment: &oap-env
+      SW_HEALTH_CHECKER: default
+      SW_TELEMETRY: prometheus
+      JAVA_OPTS: "-Xms2048m -Xmx2048m"
+
+  oap-es:
+    <<: *oap-base
+    profiles: 
+      - "elasticsearch"
     container_name: oap
     depends_on:
-      - elasticsearch
-    links:
-      - elasticsearch
-    restart: always
-    ports:
-      - 11800:11800
-      - 12800:12800
+      elasticsearch:
+        condition: service_healthy
     environment:
+      <<: *oap-env
       SW_STORAGE: elasticsearch
       SW_STORAGE_ES_CLUSTER_NODES: elasticsearch:9200
-  ui:
-    image: skywalking/ui:${TAG}
-    container_name: ui
+
+  oap-bdb:
+    <<: *oap-base
+    profiles:
+      - "banyandb"
+    container_name: oap
     depends_on:
-      - oap
-    links:
-      - oap
-    restart: always
-    ports:
-      - 8080:8080
+      banyandb:
+        condition: service_healthy
     environment:
-      SW_OAP_ADDRESS: oap:12800
+      <<: *oap-env
+      SW_STORAGE: banyandb
+      SW_STORAGE_BANYANDB_TARGETS: banyandb:17912
+
+  # SkyWalking Horizon UI — official web UI as of 10.5.0.
+  # Source: https://github.com/apache/skywalking-horizon-ui
+  # Talks to OAP via the public GraphQL/REST port (12800) and to admin-server
+  # for write APIs (UI templates, runtime-rule, dsl-debugging, status, inspect).
+  ui:
+    image: ${UI_IMAGE:-ghcr.io/apache/skywalking-horizon-ui:latest}
+    container_name: ui
+    ports:
+      # Horizon listens on 8081 inside the container (HORIZON_SERVER_PORT).
+      - "8080:8081"
+    networks:
+      - demo
+    volumes:
+      # Backend URLs (OAP query/admin/zipkin) and login users come ONLY from
+      # this file; there are no env vars for them. The image's HORIZON_CONFIG
+      # default points here.
+      - ./horizon.yaml:/app/horizon.yaml:ro
+
+networks:
+  demo:

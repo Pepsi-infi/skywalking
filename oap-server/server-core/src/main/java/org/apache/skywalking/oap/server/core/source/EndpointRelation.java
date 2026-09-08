@@ -18,14 +18,16 @@
 
 package org.apache.skywalking.oap.server.core.source;
 
+import com.google.gson.JsonObject;
 import lombok.Getter;
 import lombok.Setter;
 import org.apache.skywalking.oap.server.core.analysis.IDManager;
-import org.apache.skywalking.oap.server.core.analysis.NodeType;
+import org.apache.skywalking.oap.server.core.analysis.Layer;
 
 import static org.apache.skywalking.oap.server.core.source.DefaultScopeDefine.ENDPOINT_RELATION;
+import static org.apache.skywalking.oap.server.core.source.DefaultScopeDefine.ENDPOINT_RELATION_CATALOG_NAME;
 
-@ScopeDeclaration(id = ENDPOINT_RELATION, name = "EndpointRelation")
+@ScopeDeclaration(id = ENDPOINT_RELATION, name = "EndpointRelation", catalog = ENDPOINT_RELATION_CATALOG_NAME)
 @ScopeDefaultColumn.VirtualColumnDefinition(fieldName = "entityId", columnName = "entity_id", isID = true, type = String.class)
 public class EndpointRelation extends Source {
 
@@ -43,34 +45,27 @@ public class EndpointRelation extends Source {
 
     @Getter
     @Setter
-    @ScopeDefaultColumn.DefinedByField(columnName = "source_endpoint_name")
+    @ScopeDefaultColumn.DefinedByField(columnName = "source_endpoint_name", requireDynamicActive = true)
     private String endpoint;
-
     @Getter
-    @ScopeDefaultColumn.DefinedByField(columnName = "service_id")
     private String serviceId;
     @Getter
     @Setter
     @ScopeDefaultColumn.DefinedByField(columnName = "source_service_name", requireDynamicActive = true)
     private String serviceName;
-    @Setter
-    private NodeType serviceNodeType;
     @Getter
     @Setter
     private String serviceInstanceName;
     @Getter
     @Setter
-    @ScopeDefaultColumn.DefinedByField(columnName = "child_endpoint_name")
+    @ScopeDefaultColumn.DefinedByField(columnName = "child_endpoint_name", requireDynamicActive = true)
     private String childEndpoint;
     @Getter
-    @ScopeDefaultColumn.DefinedByField(columnName = "child_service_id")
     private String childServiceId;
     @Setter
     @Getter
     @ScopeDefaultColumn.DefinedByField(columnName = "child_service_name", requireDynamicActive = true)
     private String childServiceName;
-    @Setter
-    private NodeType childServiceNodeType;
     @Getter
     @Setter
     private String childServiceInstanceName;
@@ -85,18 +80,51 @@ public class EndpointRelation extends Source {
     private boolean status;
     @Getter
     @Setter
-    private int responseCode;
+    private int httpResponseStatusCode;
+    @Getter
+    @Setter
+    private String rpcStatusCode;
     @Getter
     @Setter
     private RequestType type;
     @Getter
     @Setter
     private DetectPoint detectPoint;
+    @Getter
+    @Setter
+    private Layer serviceLayer;
+    @Getter
+    @Setter
+    private Layer childServiceLayer;
 
     @Override
     public void prepare() {
-        serviceId = IDManager.ServiceID.buildId(serviceName, serviceNodeType);
-        childServiceId = IDManager.ServiceID.buildId(childServiceName, childServiceNodeType);
+        serviceId = IDManager.ServiceID.buildId(serviceName, serviceLayer.isNormal());
+        childServiceId = IDManager.ServiceID.buildId(childServiceName, childServiceLayer.isNormal());
+    }
+
+    @Override
+    public String toJson() {
+        final JsonObject obj = new JsonObject();
+        obj.addProperty("scope", scope());
+        obj.addProperty("entityId", getEntityId());
+        obj.addProperty("timeBucket", getTimeBucket());
+        obj.addProperty("endpoint", endpoint);
+        obj.addProperty("serviceName", serviceName);
+        obj.addProperty("serviceLayer", serviceLayer == null ? null : serviceLayer.name());
+        obj.addProperty("serviceInstanceName", serviceInstanceName);
+        obj.addProperty("childEndpoint", childEndpoint);
+        obj.addProperty("childServiceName", childServiceName);
+        obj.addProperty("childServiceLayer", childServiceLayer == null ? null : childServiceLayer.name());
+        obj.addProperty("childServiceInstanceName", childServiceInstanceName);
+        obj.addProperty("componentId", componentId);
+        obj.addProperty("rpcLatency", rpcLatency);
+        obj.addProperty("status", status);
+        obj.addProperty("httpResponseStatusCode", httpResponseStatusCode);
+        obj.addProperty("rpcStatusCode", rpcStatusCode);
+        obj.addProperty("type", type == null ? null : type.name());
+        obj.addProperty("detectPoint", detectPoint == null ? null : detectPoint.name());
+        return obj.toString();
     }
 }
 

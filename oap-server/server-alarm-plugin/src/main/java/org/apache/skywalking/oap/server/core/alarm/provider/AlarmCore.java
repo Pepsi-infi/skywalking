@@ -18,23 +18,28 @@
 
 package org.apache.skywalking.oap.server.core.alarm.provider;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import org.apache.skywalking.oap.server.core.alarm.AlarmCallback;
 import org.apache.skywalking.oap.server.core.alarm.AlarmMessage;
+import org.apache.skywalking.oap.server.core.alarm.AlarmRecoveryMessage;
 import org.joda.time.LocalDateTime;
 import org.joda.time.Minutes;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+
 /**
  * Alarm core includes metrics values in certain time windows based on alarm settings. By using its internal timer
- * trigger and the alarm rules to decides whether send the alarm to database and webhook(s)
+ * trigger and the alarm rules to decide whether send the alarm to database and webhook(s)
  */
 public class AlarmCore {
-    private static final Logger logger = LoggerFactory.getLogger(AlarmCore.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(AlarmCore.class);
 
     private LocalDateTime lastExecuteTime;
     private AlarmRulesWatcher alarmRulesWatcher;
@@ -43,19 +48,34 @@ public class AlarmCore {
         this.alarmRulesWatcher = alarmRulesWatcher;
     }
 
+    /**
+     * Find the running rules by the metrics name.
+     *
+     * @param metricsName to be found
+     * @return the matched running rule list, or null if not found.
+     */
     public List<RunningRule> findRunningRule(String metricsName) {
-        return alarmRulesWatcher.getRunningContext().get(metricsName);
+        List<RunningRule> runningRules = new ArrayList<>();
+        for (Map.Entry<String, Set<String>> entry : alarmRulesWatcher.getExprMetricsMap().entrySet()) {
+            if (entry.getValue().contains(metricsName)) {
+                List<RunningRule> found = alarmRulesWatcher.getRunningContext().get(entry.getKey());
+                if (found != null) {
+                    runningRules.addAll(found);
+                }
+            }
+        }
+        return runningRules.size() > 0 ? runningRules : null;
     }
 
     public void start(List<AlarmCallback> allCallbacks) {
         LocalDateTime now = LocalDateTime.now();
         lastExecuteTime = now;
-        Executors.newSingleThreadScheduledExecutor().scheduleAtFixedRate(() -> {
+        Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "AlarmCore")).scheduleAtFixedRate(() -> {
             try {
-                List<AlarmMessage> alarmMessageList = new ArrayList<>(30);
+                final List<AlarmMessage> alarmMessageList = new ArrayList<>(30);
                 LocalDateTime checkTime = LocalDateTime.now();
                 int minutes = Minutes.minutesBetween(lastExecuteTime, checkTime).getMinutes();
-                boolean[] hasExecute = new boolean[] {false};
+                boolean[] hasExecute = new boolean[]{false};
                 alarmRulesWatcher.getRunningContext().values().forEach(ruleList -> ruleList.forEach(runningRule -> {
                     if (minutes > 0) {
                         runningRule.moveTo(checkTime);
@@ -70,15 +90,48 @@ public class AlarmCore {
                 }));
                 // Set the last execute time, and make sure the second is `00`, such as: 18:30:00
                 if (hasExecute[0]) {
-                    lastExecuteTime = checkTime.minusSeconds(checkTime.getSecondOfMinute());
+                    lastExecuteTime = checkTime.withSecondOfMinute(0).withMillisOfSecond(0);
                 }
 
-                if (alarmMessageList.size() > 0) {
-                    allCallbacks.forEach(callback -> callback.doAlarm(alarmMessageList));
+                if (!alarmMessageList.isEmpty()) {
+                    List<AlarmMessage> alarmFiringMessageList = getAlarmFiringMessageList(alarmMessageList);
+                    List<AlarmMessage> alarmRecoveryMessageList = getAlarmRecoveryMessageList(alarmMessageList);
+                    for (AlarmCallback callback : allCallbacks) {
+                        try {
+                            if (!alarmFiringMessageList.isEmpty()) {
+                                callback.doAlarm(alarmFiringMessageList);
+                            }
+                            if (!alarmRecoveryMessageList.isEmpty()) {
+                                callback.doAlarmRecovery(alarmRecoveryMessageList);
+                            }
+                        } catch (Exception e) {
+                            LOGGER.error(e.getMessage(), e);
+                        }
+                    }
                 }
             } catch (Exception e) {
-                logger.error(e.getMessage(), e);
+                LOGGER.error(e.getMessage(), e);
+            } catch (Throwable e) {
+                LOGGER.error(e.getMessage(), e);
+            } finally {
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("move to new time and check");
+                }
             }
         }, 10, 10, TimeUnit.SECONDS);
+    }
+
+    public static List<AlarmMessage> getAlarmFiringMessageList(List<AlarmMessage> alarmMessageList) {
+        return alarmMessageList
+                .stream()
+                .filter(msg -> !(msg instanceof AlarmRecoveryMessage))
+                .collect(Collectors.toList());
+    }
+
+    public static List<AlarmMessage> getAlarmRecoveryMessageList(List<AlarmMessage> alarmMessageList) {
+        return alarmMessageList
+                .stream()
+                .filter(msg -> msg instanceof AlarmRecoveryMessage)
+                .collect(Collectors.toList());
     }
 }

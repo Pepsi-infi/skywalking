@@ -28,11 +28,6 @@
         <property name="eachLine" value="true"/>
     </module>
 
-    <module name="RegexpHeader">
-        <property name="headerFile" value="${checkstyle.header.file}"/>
-        <property name="multiLines" value="1, 2, 3, 18"/>
-    </module>
-
     <module name="RegexpSingleline">
         <property name="format" value="System\.out\.println"/>
         <property name="message" value="Prohibit invoking System.out.println in source code !"/>
@@ -79,7 +74,7 @@
         <!--Checks that long constants are defined with an upper ell-->
         <module name="UpperEll"/>
         <module name="ConstantName">
-            <property name="format" value="(^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$)|(^logger)"/>
+            <property name="format" value="(^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$)"/>
         </module>
         <!--Checks that local, non-final variable names conform to producerGroup format specified by the format property-->
         <module name="LocalVariableName"/>
@@ -105,6 +100,7 @@
         <module name="TypeName">
             <property name="format" value="(^[A-Z][a-zA-Z0-9]*$)|(^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$)"/>
         </module>
+        <module name="MissingOverride"/>
 
         <!--whitespace-->
         <module name="GenericWhitespace"/>
@@ -117,16 +113,6 @@
             <property name="allowNoEmptyLineBetweenFields" value="true"/>
             <property name="allowMultipleEmptyLines" value="false"/>
             <property name="allowMultipleEmptyLinesInsideClassMembers" value="false"/>
-        </module>
-
-        <module name="ImportControl">
-            <property name="file" value="${import.control}"/>
-            <property name="path" value="apm-sniffer/(apm-sdk-plugin|bootstrap-plugins|optional-plugins)/.+/src/main/.+Instrumentation.java$"/>
-        </module>
-
-        <module name="ImportControl">
-            <property name="file" value="${import.control}"/>
-            <property name="path" value="apm-sniffer/apm-toolkit-activation/.+/src/main/.+Activation.java$"/>
         </module>
     </module>
 </module>

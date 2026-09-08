@@ -1,0 +1,88 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+  cases:
+    # service list
+    - query: swctl --display yaml --base-url=http://${oap_host}:${oap_12800}/graphql service ls
+      expected: expected/service.yml
+    # before silence alarm list WARNING,receivers=lisi
+    - query: |
+        sleep 5;
+        swctl --display yaml --base-url=http://${oap_host}:${oap_12800}/graphql alarm ls --tags level=WARNING,receivers=lisi
+      expected: expected/silence-before-graphql-warn.yml
+    # before silence alarm list level=CRITICAL,receivers=zhangsan
+    - query: swctl --display yaml --base-url=http://${oap_host}:${oap_12800}/graphql alarm ls --tags level=CRITICAL,receivers=zhangsan
+      expected: expected/silence-before-graphql-critical.yml
+    # query auto complete tag key and value
+    - query: swctl --display yaml --base-url=http://${oap_host}:${oap_12800}/graphql alarm autocomplete-keys
+      expected: expected/tag-keys.yml
+    - query: swctl --display yaml --base-url=http://${oap_host}:${oap_12800}/graphql alarm autocomplete-values --key=level
+      expected: expected/tag-values.yml
+    # before silence webhook
+    - query: |
+        sleep 30;
+        curl  -XPOST http://${provider_host}:${provider_9090}/alarm/read
+      expected: expected/silence-before-webhook.yml
+    # after silence alarm list WARNING,receivers=lisi
+    - query: |
+        sleep 30;
+        swctl --display yaml --base-url=http://${oap_host}:${oap_12800}/graphql alarm ls --tags level=WARNING,receivers=lisi
+      expected: expected/silence-after-graphql-warn.yml
+    # after silence alarm list level=CRITICAL,receivers=zhangsan
+    - query: swctl --display yaml --base-url=http://${oap_host}:${oap_12800}/graphql alarm ls --tags level=CRITICAL,receivers=zhangsan
+      expected: expected/silence-after-graphql-critical.yml
+    # after silence webhook
+    - query: curl -s -XPOST http://${provider_host}:${provider_9090}/alarm/read
+      expected: expected/silence-after-webhook.yml
+    - query: |
+        sleep 60;
+        curl -s -XPOST http://${provider_host}:${provider_9090}/alarm/read
+      expected: expected/recovery-webhook.yml
+    - query: |
+        sleep 60;
+        curl -s -XPOST http://${provider_host}:${provider_9090}/alarm/read
+      expected: expected/recovery-after-observation-webhook.yml
+    # queryAlarms (11.0.0): comprehensive query API, entity-filtered to alarms
+    # whose alarmed entity is e2e-service-provider. id0/id1 are indexed in
+    # 11.0.0 so the entity filter pushes down to storage. Replaces the legacy
+    # getAlarm category-scope filter with an Entity-typed multi-select.
+    - query: |
+        curl -s -X POST http://${oap_host}:${oap_12800}/graphql \
+          -H 'Content-Type: application/json' \
+          -d '{"query":"query ($cond: AlarmQueryCondition!) { queryAlarms(condition: $cond) { msgs { scope name } } }","variables":{"cond":{"duration":{"start":"'"$(date -u -v-1H '+%Y-%m-%d %H%M' 2>/dev/null || date -u -d '1 hour ago' '+%Y-%m-%d %H%M')"'","end":"'"$(date -u '+%Y-%m-%d %H%M')"'","step":"MINUTE"},"paging":{"pageNum":1,"pageSize":50},"entities":[{"scope":"Service","serviceName":"e2e-service-provider","normal":true}]}}}' | yq -P '.data.queryAlarms'
+      expected: expected/queryAlarms-entity-provider.yml
+    # queryAlarms: ruleNames filter — return only alarms fired by the
+    # service_resp_time_rule rule (the YAML key in alarm-settings.yml
+    # is the rule name as stored on AlarmRecord), regardless of entity.
+    - query: |
+        curl -s -X POST http://${oap_host}:${oap_12800}/graphql \
+          -H 'Content-Type: application/json' \
+          -d '{"query":"query ($cond: AlarmQueryCondition!) { queryAlarms(condition: $cond) { msgs { name } } }","variables":{"cond":{"duration":{"start":"'"$(date -u -v-1H '+%Y-%m-%d %H%M' 2>/dev/null || date -u -d '1 hour ago' '+%Y-%m-%d %H%M')"'","end":"'"$(date -u '+%Y-%m-%d %H%M')"'","step":"MINUTE"},"paging":{"pageNum":1,"pageSize":50},"ruleNames":["service_resp_time_rule"]}}}' | yq -P '.data.queryAlarms'
+      expected: expected/queryAlarms-rule-resptime.yml
+    # queryAlarms: layer filter — only alarms whose alarmed entity belongs
+    # to the GENERAL layer. The provider / consumer services e2e installs
+    # report as GENERAL via the Java agent.
+    - query: |
+        curl -s -X POST http://${oap_host}:${oap_12800}/graphql \
+          -H 'Content-Type: application/json' \
+          -d '{"query":"query ($cond: AlarmQueryCondition!) { queryAlarms(condition: $cond) { msgs { scope name } } }","variables":{"cond":{"duration":{"start":"'"$(date -u -v-1H '+%Y-%m-%d %H%M' 2>/dev/null || date -u -d '1 hour ago' '+%Y-%m-%d %H%M')"'","end":"'"$(date -u '+%Y-%m-%d %H%M')"'","step":"MINUTE"},"paging":{"pageNum":1,"pageSize":50},"layer":"GENERAL"}}}' | yq -P '.data.queryAlarms'
+      expected: expected/queryAlarms-layer-general.yml
+    # queryAlarms: no filters beyond duration/paging — should return the
+    # same set as the legacy getAlarm without scope.
+    - query: |
+        curl -s -X POST http://${oap_host}:${oap_12800}/graphql \
+          -H 'Content-Type: application/json' \
+          -d '{"query":"query ($cond: AlarmQueryCondition!) { queryAlarms(condition: $cond) { msgs { scope } } }","variables":{"cond":{"duration":{"start":"'"$(date -u -v-1H '+%Y-%m-%d %H%M' 2>/dev/null || date -u -d '1 hour ago' '+%Y-%m-%d %H%M')"'","end":"'"$(date -u '+%Y-%m-%d %H%M')"'","step":"MINUTE"},"paging":{"pageNum":1,"pageSize":50}}}}' | yq -P '.data.queryAlarms'
+      expected: expected/queryAlarms-unfiltered.yml

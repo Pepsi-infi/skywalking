@@ -22,19 +22,19 @@
 
     <groupId>org.apache.skywalking</groupId>
     <artifactId>apm</artifactId>
-    <version>8.0.0-SNAPSHOT</version>
+    <version>${revision}</version>
 
     <parent>
         <groupId>org.apache</groupId>
         <artifactId>apache</artifactId>
-        <version>21</version>
+        <version>30</version>
         <relativePath />
     </parent>
 
     <modules>
-        <module>apm-commons</module>
         <module>apm-protocol</module>
     </modules>
+
     <packaging>pom</packaging>
 
     <name>apm</name>
@@ -76,31 +76,13 @@
 
     <profiles>
         <profile>
-            <id>agent</id>
-            <activation>
-                <activeByDefault>true</activeByDefault>
-            </activation>
-            <modules>
-                <module>apm-sniffer</module>
-                <module>apm-application-toolkit</module>
-            </modules>
-        </profile>
-        <profile>
             <id>backend</id>
             <activation>
                 <activeByDefault>true</activeByDefault>
             </activation>
             <modules>
                 <module>oap-server</module>
-            </modules>
-        </profile>
-        <profile>
-            <id>ui</id>
-            <activation>
-                <activeByDefault>true</activeByDefault>
-            </activation>
-            <modules>
-                <module>apm-webapp</module>
+                <module>oap-server-bom</module>
             </modules>
         </profile>
         <profile>
@@ -110,7 +92,6 @@
             </activation>
             <modules>
                 <module>apm-dist</module>
-                <module>apm-dist-es7</module>
             </modules>
         </profile>
         <profile>
@@ -119,12 +100,9 @@
                 <activeByDefault>false</activeByDefault>
             </activation>
             <modules>
-                <module>apm-sniffer</module>
-                <module>apm-application-toolkit</module>
                 <module>oap-server</module>
-                <module>apm-webapp</module>
+                <module>oap-server-bom</module>
                 <module>apm-dist</module>
-                <module>apm-dist-es7</module>
             </modules>
             <build>
                 <plugins>
@@ -155,93 +133,90 @@
                 </plugins>
             </build>
         </profile>
-        <profile>
-            <id>CI-with-IT</id>
-            <activation>
-                <activeByDefault>false</activeByDefault>
-            </activation>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-failsafe-plugin</artifactId>
-                        <executions>
-                            <execution>
-                                <goals>
-                                    <goal>integration-test</goal>
-                                    <goal>verify</goal>
-                                </goals>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
     </profiles>
 
     <properties>
+        <revision>11.1.0-SNAPSHOT</revision>
+
+        <!-- Built in properties -->
+        <maven.compiler.release>11</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <compiler.version>1.8</compiler.version>
-        <powermock.version>1.6.4</powermock.version>
+        <!-- `project.build.outputTimestamp` is required for reproducible builds: https://maven.apache.org/guides/mini/guide-reproducible-builds.html -->
+        <project.build.outputTimestamp>1715298980</project.build.outputTimestamp>
+
+        <!-- Compiling and test stages tools. -->
         <checkstyle.version>6.18</checkstyle.version>
-        <junit.version>4.12</junit.version>
-        <mockito-all.version>1.10.19</mockito-all.version>
-        <lombok.version>1.18.10</lombok.version>
+        <junit.version>5.9.2</junit.version>
+        <mockito-core.version>5.11.0</mockito-core.version>
+        <system-stubs.version>2.1.4</system-stubs.version>
+        <lombok.version>1.18.40</lombok.version>
+        <byte-buddy.version>1.18.7</byte-buddy.version>
 
         <!-- core lib dependency -->
-        <grpc.version>1.26.0</grpc.version>
+        <grpc.version>1.80.0</grpc.version>
+        <protobuf-java.version>4.33.1</protobuf-java.version>
+        <netty.version>4.2.15.Final</netty.version>
+        <netty-tcnative-boringssl-static.version>2.0.77.Final</netty-tcnative-boringssl-static.version>
+        <gson.version>2.9.0</gson.version>
         <os-maven-plugin.version>1.6.2</os-maven-plugin.version>
         <protobuf-maven-plugin.version>0.6.1</protobuf-maven-plugin.version>
-        <com.google.protobuf.protoc.version>3.3.0</com.google.protobuf.protoc.version>
-        <protoc-gen-grpc-java.plugin.version>1.8.0</protoc-gen-grpc-java.plugin.version>
-        <netty-tcnative-boringssl-static.version>2.0.26.Final</netty-tcnative-boringssl-static.version>
+        <bufbuild.protoc-gen-validate.version>1.3.0</bufbuild.protoc-gen-validate.version>
+        <javax.annotation-api.version>1.3.2</javax.annotation-api.version>
+        <objenesis.version>3.1</objenesis.version>
+        <!-- necessary for Java 9+ -->
+        <org.apache.tomcat.annotations-api.version>6.0.53</org.apache.tomcat.annotations-api.version>
+
+        <!--
+          The version of Antlr compiler (maven plugin) must match the version of runtime (maven dependency),
+          hence we don't allow arbitrary dependency overriding in oap-server-bom and keep the version only here
+          in a single place. Upgrading Antlr version here requires recompiling the oal-rt/oal-rt modules so users
+          won't face error like "ANTLR Tool version 4.9.3 used for code generation does not match the current runtime version 4.7.1".
+        -->
+        <antlr.version>4.11.1</antlr.version>
 
         <!-- Plugin versions -->
-        <docker.plugin.version>0.4.13</docker.plugin.version>
+        <maven-failsafe-plugin.version>3.0.0-M8</maven-failsafe-plugin.version>
         <takari-maven-plugin.version>0.6.1</takari-maven-plugin.version>
         <exec-maven-plugin.version>1.6.0</exec-maven-plugin.version>
-        <maven-antrun-plugin.version>1.8</maven-antrun-plugin.version>
-        <maven-deploy-plugin.version>2.8.2</maven-deploy-plugin.version>
-        <maven-assembly-plugin.version>3.1.0</maven-assembly-plugin.version>
-        <maven-failsafe-plugin.version>2.22.0</maven-failsafe-plugin.version>
-        <maven-surefire-plugin.version>2.22.0</maven-surefire-plugin.version>
-        <maven-jar-plugin.version>3.1.0</maven-jar-plugin.version>
-        <maven-shade-plugin.version>3.1.1</maven-shade-plugin.version>
-        <maven-enforcer-plugin.version>3.0.0-M2</maven-enforcer-plugin.version>
-        <apache-rat-plugin.version>0.12</apache-rat-plugin.version>
-        <maven-compiler-plugin.version>3.8.0</maven-compiler-plugin.version>
-        <maven-resource-plugin.version>3.1.0</maven-resource-plugin.version>
-        <maven-source-plugin.version>3.0.1</maven-source-plugin.version>
-        <versions-maven-plugin.version>2.5</versions-maven-plugin.version>
-        <coveralls-maven-plugin.version>4.3.0</coveralls-maven-plugin.version>
+        <build-helper-maven-plugin.version>3.2.0</build-helper-maven-plugin.version>
         <maven-checkstyle-plugin.version>3.1.0</maven-checkstyle-plugin.version>
-        <jmh.version>1.21</jmh.version>
-        <gmaven-plugin.version>1.5</gmaven-plugin.version>
-        <cobertura-maven-plugin.version>2.7</cobertura-maven-plugin.version>
+        <jmh.version>1.37</jmh.version>
         <checkstyle.fails.on.error>true</checkstyle.fails.on.error>
-        <javax.annotation-api.version>1.3.2</javax.annotation-api.version>
+        <assertj-core.version>3.27.7</assertj-core.version>
+        <cyclonedx-maven-plugin.version>2.8.0</cyclonedx-maven-plugin.version>
+        <flatten-plugin-version>1.6.0</flatten-plugin-version>
+
+        <skipUTs>false</skipUTs>
+        <argLine>-javaagent:${settings.localRepository}/net/bytebuddy/byte-buddy-agent/${byte-buddy.version}/byte-buddy-agent-${byte-buddy.version}.jar --add-opens java.base/java.lang=ALL-UNNAMED</argLine>
+
+        <delombok.output.dir>${project.build.directory}/delombok</delombok.output.dir>
     </properties>
 
     <dependencies>
         <dependency>
-            <groupId>junit</groupId>
-            <artifactId>junit</artifactId>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-params</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.mockito</groupId>
-            <artifactId>mockito-all</artifactId>
+            <artifactId>mockito-core</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.powermock</groupId>
-            <artifactId>powermock-module-junit4</artifactId>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
+
         <dependency>
-            <groupId>org.powermock</groupId>
-            <artifactId>powermock-api-mockito</artifactId>
-            <scope>test</scope>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
         </dependency>
 
         <dependency>
@@ -250,12 +225,14 @@
             <version>${jmh.version}</version>
             <scope>test</scope>
         </dependency>
+
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <version>${lombok.version}</version>
             <scope>provided</scope>
         </dependency>
+
         <dependency>
             <groupId>javax.annotation</groupId>
             <artifactId>javax.annotation-api</artifactId>
@@ -267,88 +244,209 @@
     <dependencyManagement>
         <dependencies>
             <dependency>
-                <groupId>junit</groupId>
-                <artifactId>junit</artifactId>
+                <groupId>org.junit</groupId>
+                <artifactId>junit-bom</artifactId>
                 <version>${junit.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-core</artifactId>
+                <version>${mockito-core.version}</version>
                 <scope>test</scope>
             </dependency>
             <dependency>
                 <groupId>org.mockito</groupId>
-                <artifactId>mockito-all</artifactId>
-                <version>${mockito-all.version}</version>
+                <artifactId>mockito-junit-jupiter</artifactId>
+                <version>${mockito-core.version}</version>
+                <scope>test</scope>
+                <exclusions>
+                    <exclusion>
+                        <groupId>net.bytebuddy</groupId>
+                        <artifactId>byte-buddy</artifactId>
+                    </exclusion>
+                    <exclusion>
+                        <groupId>net.bytebuddy</groupId>
+                        <artifactId>byte-buddy-agent</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+            <dependency>
+                <groupId>net.bytebuddy</groupId>
+                <artifactId>byte-buddy</artifactId>
+                <version>${byte-buddy.version}</version>
                 <scope>test</scope>
             </dependency>
             <dependency>
-                <groupId>org.powermock</groupId>
-                <artifactId>powermock-module-junit4</artifactId>
-                <version>${powermock.version}</version>
+                <groupId>net.bytebuddy</groupId>
+                <artifactId>byte-buddy-agent</artifactId>
+                <version>${byte-buddy.version}</version>
+                <scope>test</scope>
+            </dependency>
+
+            <dependency>
+                <groupId>org.assertj</groupId>
+                <artifactId>assertj-core</artifactId>
+                <version>${assertj-core.version}</version>
                 <scope>test</scope>
             </dependency>
             <dependency>
-                <groupId>org.powermock</groupId>
-                <artifactId>powermock-api-mockito</artifactId>
-                <version>${powermock.version}</version>
+                <groupId>uk.org.webcompere</groupId>
+                <artifactId>system-stubs-jupiter</artifactId>
+                <version>${system-stubs.version}</version>
+                <scope>test</scope>
+                <exclusions>
+                    <exclusion>
+                        <groupId>net.bytebuddy</groupId>
+                        <artifactId>byte-buddy</artifactId>
+                    </exclusion>
+                    <exclusion>
+                        <groupId>net.bytebuddy</groupId>
+                        <artifactId>byte-buddy-agent</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+
+            <dependency>
+                <groupId>org.openjdk.jmh</groupId>
+                <artifactId>jmh-generator-annprocess</artifactId>
+                <version>${jmh.version}</version>
                 <scope>test</scope>
             </dependency>
+
+            <!-- These dependencies will be bundled in JDK9+ but we don't need them, just exclude them. -->
+            <dependency>
+                <groupId>javax.xml.bind</groupId>
+                <artifactId>jaxb-api</artifactId>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.glassfish.jaxb</groupId>
+                <artifactId>jaxb-runtime</artifactId>
+                <scope>provided</scope>
+            </dependency>
+
+            <dependency>
+                <groupId>org.antlr</groupId>
+                <artifactId>antlr4-runtime</artifactId>
+                <version>${antlr.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.google.protobuf</groupId>
+                <artifactId>protobuf-bom</artifactId>
+                <version>${protobuf-java.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
         </dependencies>
     </dependencyManagement>
 
     <build>
         <pluginManagement>
             <plugins>
-                <!-- mvn -N io.takari:maven:wrapper -Dmaven=3.5.4 -->
                 <plugin>
-                    <groupId>io.takari</groupId>
-                    <artifactId>maven</artifactId>
-                    <version>${takari-maven-plugin.version}</version>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.13.0</version>
+                    <configuration>
+                        <annotationProcessorPaths>
+                            <path>
+                                <groupId>org.projectlombok</groupId>
+                                <artifactId>lombok</artifactId>
+                                <version>${lombok.version}</version>
+                            </path>
+                        </annotationProcessorPaths>
+                    </configuration>
                 </plugin>
                 <plugin>
-                    <artifactId>maven-antrun-plugin</artifactId>
-                    <version>${maven-antrun-plugin.version}</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-deploy-plugin</artifactId>
-                    <version>${maven-deploy-plugin.version}</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-assembly-plugin</artifactId>
-                    <version>${maven-assembly-plugin.version}</version>
-                </plugin>
-                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-failsafe-plugin</artifactId>
-                    <version>${maven-failsafe-plugin.version}</version>
+                    <configuration>
+                        <argLine>${argLine}</argLine>
+                    </configuration>
+                    <executions>
+                        <execution>
+                            <goals>
+                                <goal>integration-test</goal>
+                            </goals>
+                        </execution>
+                    </executions>
                 </plugin>
                 <plugin>
                     <artifactId>maven-jar-plugin</artifactId>
-                    <version>${maven-jar-plugin.version}</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-shade-plugin</artifactId>
-                    <version>${maven-shade-plugin.version}</version>
+                    <configuration>
+                        <forceCreation>true</forceCreation>
+                    </configuration>
                 </plugin>
                 <!--
                     maven-surefire-plugin will exclude integration tests (ITs)
                     and leave them for maven-failsafe-plugin to run, which is bound to the `verify` goal.
-                    If you want to run the ITs please activate the CI-with-IT profile
-                    as well as the the profiles of the modules whose ITs you want to run.
-                    e.g. you want to run the ITs in oap-server, run `./mvnw -Pbackend,CI-with-IT clean verify`
+                    If you want to run the ITs please run ./mvnw integration-test,
+                    e.g. you want to run the ITs in oap-server, run `./mvnw -Pbackend clean integration-test`
                  -->
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
-                    <version>${maven-surefire-plugin.version}</version>
                     <configuration>
+                        <skip>${skipUTs}</skip>
+                        <argLine>${argLine}</argLine>
                         <excludes>
-                            <exclude>IT*.class</exclude>
+                            <exclude>**/IT*.java</exclude>
+                            <exclude>**/*IT.java</exclude>
                         </excludes>
                     </configuration>
                 </plugin>
+
                 <plugin>
-                    <groupId>io.fabric8</groupId>
-                    <artifactId>docker-maven-plugin</artifactId>
-                    <version>${maven-docker-plugin.version}</version>
+                    <groupId>org.antlr</groupId>
+                    <artifactId>antlr4-maven-plugin</artifactId>
+                    <version>${antlr.version}</version>
+                </plugin>
+
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-gpg-plugin</artifactId>
+                    <version>3.2.6</version>
+                    <executions>
+                        <execution>
+                            <id>sign-artifacts</id>
+                            <phase>verify</phase>
+                            <goals>
+                                <goal>sign</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+                <plugin>
+                    <groupId>org.cyclonedx</groupId>
+                    <artifactId>cyclonedx-maven-plugin</artifactId>
+                    <version>${cyclonedx-maven-plugin.version}</version>
+                    <executions>
+                        <execution>
+                            <phase>package</phase>
+                            <goals>
+                                <goal>makeBom</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-deploy-plugin</artifactId>
                     <configuration>
-                        <containerNamePattern>%a-%t-%i</containerNamePattern>
+                        <retryFailedDeploymentCount>5</retryFailedDeploymentCount>
+                    </configuration>
+                  </plugin>
+                <plugin>
+                    <groupId>org.codehaus.mojo</groupId>
+                    <artifactId>flatten-maven-plugin</artifactId>
+                    <version>${flatten-plugin-version}</version>
+                    <configuration>
+                        <flattenMode>resolveCiFriendliesOnly</flattenMode>
+                        <updatePomFile>true</updatePomFile>
                     </configuration>
                 </plugin>
             </plugins>
@@ -368,19 +466,19 @@
                 </executions>
             </plugin>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-enforcer-plugin</artifactId>
-                <version>${maven-enforcer-plugin.version}</version>
                 <executions>
                     <execution>
                         <id>enforce-java</id>
                         <goals>
                             <goal>enforce</goal>
                         </goals>
+                        <phase>validate</phase>
                         <configuration>
                             <rules>
                                 <requireJavaVersion>
-                                    <!-- Build has not yet been updated for Java 9+ -->
-                                    <version>1.8</version>
+                                    <version>11</version>
                                 </requireJavaVersion>
                             </rules>
                         </configuration>
@@ -388,175 +486,15 @@
                 </executions>
             </plugin>
             <plugin>
-                <groupId>org.apache.rat</groupId>
-                <artifactId>apache-rat-plugin</artifactId>
-                <version>${apache-rat-plugin.version}</version>
-                <configuration>
-                    <excludeSubProjects>false</excludeSubProjects>
-                    <addDefaultLicenseMatchers>false</addDefaultLicenseMatchers>
-                    <licenses>
-                        <license implementation="org.apache.rat.analysis.license.SimplePatternBasedLicense">
-                            <licenseFamilyCategory>AL20</licenseFamilyCategory>
-                            <licenseFamilyName>Apache License, 2.0</licenseFamilyName>
-                            <patterns>
-                                <pattern>Licensed to the Apache Software Foundation (ASF)</pattern>
-                            </patterns>
-                        </license>
-                    </licenses>
-                    <licenseFamilies>
-                        <licenseFamily implementation="org.apache.rat.license.SimpleLicenseFamily">
-                            <familyName>Apache License, 2.0</familyName>
-                        </licenseFamily>
-                    </licenseFamilies>
-                    <excludes>
-                        <exclude>**/target/**</exclude>
-                        <exclude>**/licenses/**</exclude>
-                        <exclude>**/ui-licenses/**</exclude>
-                        <exclude>**/codeStyle.xml</exclude>
-
-                        <!-- IDE files -->
-                        <exclude>**/*.iml</exclude>
-                        <exclude>**/.idea/**</exclude>
-                        <exclude>**/*.classpath</exclude>
-                        <exclude>**/.project</exclude>
-                        <exclude>**/.settings/**</exclude>
-                        <exclude>**/dependency-reduced-pom.xml</exclude>
-                        <exclude>**/.vscode/**</exclude>
-                        <exclude>**/.factorypath</exclude>
-
-                        <!-- Docker compose envrioment variables file -->
-                        <excludes>**/.env/**</excludes>
-
-                        <!-- UI IDE configs -->
-                        <exclude>**/skywalking-ui/.editorconfig</exclude>
-                        <!-- UI ignore -->
-                        <exclude>**/skywalking-ui/.browserslistrc</exclude>
-                        <!-- UI prettier config -->
-                        <exclude>**/skywalking-ui/.prettierrc</exclude>
-
-                        <!-- git files -->
-                        <exclude>**/.gitignore</exclude>
-                        <exclude>**/.gitmodules</exclude>
-                        <exclude>**/.git/**</exclude>
-
-                        <!-- CI files -->
-                        <exclude>**/.travis.yml</exclude>
-
-                        <!-- GitHub files -->
-                        <exclude>**/.github/**</exclude>
-
-                        <!-- document files -->
-                        <exclude>**/*.md</exclude>
-                        <excldue>**/*.MD</excldue>
-                        <exclude>**/*.txt</exclude>
-                        <exclude>**/docs/**</exclude>
-
-                        <!-- Test cases data in JSON format -->
-                        <exclude>**/src/test/resources/json/*.json</exclude>
-
-                        <!-- front end libary and generated files -->
-                        <exclude>**/skywalking-ui/node_modules/**</exclude>
-                        <exclude>**/skywalking-ui/node/**</exclude>
-                        <exclude>**/skywalking-ui/dist/**</exclude>
-
-                        <!-- web UI dependencies descriptions -->
-                        <exclude>skywalking-ui/package.json</exclude>
-                        <exclude>skywalking-ui/package-lock.json</exclude>
-
-                        <!-- Proto files of Istio, envoy, prometheus and gogoproto projects -->
-                        <exclude>**/src/main/proto/envoy/**</exclude>
-                        <exclude>**/src/main/proto/gogoproto/gogo.proto</exclude>
-                        <exclude>**/src/main/proto/google/**</exclude>
-                        <exclude>**/src/main/proto/istio/**</exclude>
-                        <exclude>**/src/main/proto/jaeger/**</exclude>
-                        <exclude>**/src/main/proto/mixer/**</exclude>
-                        <exclude>**/src/main/proto/policy/**</exclude>
-                        <exclude>**/src/main/proto/prometheus/client_model/metrics.proto</exclude>
-                        <exclude>**/src/main/proto/protoc-gen-swagger/**</exclude>
-                        <exclude>**/src/main/proto/validate/validate.proto</exclude>
-
-                        <!-- generated file from oal grammar and rt template -->
-                        <exclude>**/src/main/antlr4/org/apache/skywalking/oal/rt/grammar/OALLexer.tokens</exclude>
-                        <exclude>**/src/main/resources/code-templates/*/*.ftl</exclude>
-
-                        <!-- Maven Wrapper generated files -->
-                        <exclude>.mvn/wrapper/**</exclude>
-                        <exclude>tools/dependencies/known-oap-backend-dependencies.txt</exclude>
-                        <exclude>apm-checkstyle/CHECKSTYLE_HEAD</exclude>
-
-                        <!-- generated file from test agent plugin scenarios -->
-                        <exclude>**/test/plugin/workspace/**</exclude>
-
-                        <!-- TSL relevant files for e2e test -->
-                        <exclude>**/*.crt</exclude>
-                        <exclude>**/*.pem</exclude>
-
-                        <exclude>.m2/**</exclude>
-                    </excludes>
-                </configuration>
-                <executions>
-                    <execution>
-                        <phase>verify</phase>
-                        <goals>
-                            <goal>check</goal>
-                        </goals>
-                    </execution>
-                </executions>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
             </plugin>
             <plugin>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>${maven-compiler-plugin.version}</version>
-                <configuration>
-                    <source>${compiler.version}</source>
-                    <target>${compiler.version}</target>
-                    <encoding>${project.build.sourceEncoding}</encoding>
-                </configuration>
-            </plugin>
-            <plugin>
-                <artifactId>maven-resources-plugin</artifactId>
-                <version>${maven-resource-plugin.version}</version>
-                <configuration>
-                    <encoding>${project.build.sourceEncoding}</encoding>
-                </configuration>
-            </plugin>
-            <plugin>
-                <groupId>com.spotify</groupId>
-                <artifactId>docker-maven-plugin</artifactId>
-                <version>${docker.plugin.version}</version>
-                <configuration>
-                    <skipDocker>true</skipDocker>
-                </configuration>
-            </plugin>
-            <plugin>
-                <artifactId>maven-source-plugin</artifactId>
-                <version>${maven-source-plugin.version}</version>
-                <executions>
-                    <execution>
-                        <id>attach-sources</id>
-                        <phase>none</phase>
-                        <goals>
-                            <goal>jar</goal>
-                        </goals>
-                    </execution>
-                </executions>
-            </plugin>
-            <plugin>
-                <groupId>org.eluder.coveralls</groupId>
-                <artifactId>coveralls-maven-plugin</artifactId>
-                <version>${coveralls-maven-plugin.version}</version>
-                <configuration>
-                    <repoToken>${COVERALLS_REPO_TOKEN}</repoToken>
-                    <sourceDirectories>
-                        <sourceDirectory>${project.build.sourceDirectory}</sourceDirectory>
-                    </sourceDirectories>
-                </configuration>
-            </plugin>
-            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-checkstyle-plugin</artifactId>
                 <version>${maven-checkstyle-plugin.version}</version>
                 <configuration>
-                    <configLocation>apm-checkstyle/checkStyle.xml</configLocation>
-                    <headerLocation>apm-checkstyle/CHECKSTYLE_HEAD</headerLocation>
+                    <configLocation>${maven.multiModuleProjectDirectory}/apm-checkstyle/checkStyle.xml</configLocation>
                     <encoding>UTF-8</encoding>
                     <consoleOutput>true</consoleOutput>
                     <includeTestSourceDirectory>true</includeTestSourceDirectory>
@@ -573,8 +511,11 @@
                         **/*.yaml,
                         **/*.xml
                     </resourceIncludes>
+                    <resourceExcludes>
+                        **/.asf.yaml,
+                        **/.github/**
+                    </resourceExcludes>
                     <excludes>
-                        **/target/generated-test-sources/**,
                         org/apache/skywalking/apm/network/register/v2/**/*.java,
                         org/apache/skywalking/apm/network/common/**/*.java,
                         org/apache/skywalking/apm/network/servicemesh/**/*.java,
@@ -582,11 +523,10 @@
                         org/apache/skywalking/oap/server/core/remote/grpc/proto/*.java,
                         org/apache/skywalking/oal/rt/grammar/*.java,
                         org/apache/skywalking/oap/server/exporter/grpc/*.java,
-                        org/apache/skywalking/oap/server/configuration/service/*.java
+                        org/apache/skywalking/oap/server/configuration/service/*.java,
+                        **/jmh_generated/*.java,
+                        org/junit/**/*.java
                     </excludes>
-                    <propertyExpansion>
-                        import.control=apm-checkstyle/importControl.xml
-                    </propertyExpansion>
                 </configuration>
                 <executions>
                     <execution>
@@ -598,43 +538,56 @@
                     </execution>
                 </executions>
             </plugin>
+
+            <plugin>
+                <groupId>org.projectlombok</groupId>
+                <artifactId>lombok-maven-plugin</artifactId>
+                <version>1.18.20.0</version>
+                <configuration>
+                    <sourceDirectory>${project.basedir}/src/main/java</sourceDirectory>
+                    <addOutputDirectory>false</addOutputDirectory>
+                    <outputDirectory>${delombok.output.dir}</outputDirectory>
+                    <encoding>UTF-8</encoding>
+                </configuration>
+                <executions>
+                    <execution>
+                        <phase>compile</phase>
+                        <goals>
+                            <goal>delombok</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <dependencies>
+                    <dependency>
+                        <groupId>org.projectlombok</groupId>
+                        <artifactId>lombok</artifactId>
+                        <version>${lombok.version}</version>
+                    </dependency>
+                </dependencies>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <configuration>
+                    <sourcepath>
+                        ${delombok.output.dir};
+                        ${project.build.directory}/generated-sources/protobuf/java;
+                        ${project.build.directory}/generated-sources/protobuf/grpc-java;
+                        ${project.build.directory}/generated-sources/antlr4;;
+                    </sourcepath>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.cyclonedx</groupId>
+                <artifactId>cyclonedx-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-gpg-plugin</artifactId>
+            </plugin>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
-                <artifactId>cobertura-maven-plugin</artifactId>
-                <version>${cobertura-maven-plugin.version}</version>
-                <configuration>
-                    <check />
-                    <aggregate>true</aggregate>
-                    <encoding>${project.build.sourceEncoding}</encoding>
-                    <quiet>true</quiet>
-                    <formats>
-                        <format>html</format>
-                        <format>xml</format>
-                    </formats>
-                    <instrumentation>
-                        <ignoreTrivial>true</ignoreTrivial>
-                        <ignoreMethodAnnotations>
-                            <ignoreMethodAnnotation>lombok.Generated</ignoreMethodAnnotation>
-                        </ignoreMethodAnnotations>
-                        <includes>
-                            <include>org/apache/skywalking/**/*.class</include>
-                        </includes>
-                        <excludes>
-                            <exclude>org/apache/skywalking/**/*Test.class</exclude>
-                            <exclude>org/apache/skywalking/**/Test*.class</exclude>
-                            <exclude>org/apache/skywalking/apm/network/register/v2/**/*.class</exclude>
-                            <exclude>org/apache/skywalking/apm/network/common/**/*.class</exclude>
-                            <exclude>org/apache/skywalking/apm/network/servicemesh/**/*.class</exclude>
-                            <exclude>org/apache/skywalking/apm/network/language/**/*.class</exclude>
-                            <exclude>org/apache/skywalking/oap/server/core/remote/grpc/proto/*.class</exclude>
-                            <exclude>org/apache/skywalking/oal/rt/grammar/*.class</exclude>
-                            <exclude>org/apache/skywalking/oap/server/exporter/grpc/*.class</exclude>
-                            <exclude>org/apache/skywalking/apm/toolkit/**/*Activation.class</exclude>
-                            <exclude>org/apache/skywalking/apm/plugin/**/*Instrumentation.class</exclude>
-                            <exclude>org/apache/skywalking/apm/plugin/**/*Instrumentation$*.class</exclude>
-                        </excludes>
-                    </instrumentation>
-                </configuration>
+                <artifactId>flatten-maven-plugin</artifactId>
             </plugin>
         </plugins>
     </build>

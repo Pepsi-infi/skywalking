@@ -18,44 +18,47 @@
 
 package org.apache.skywalking.oap.server.core.analysis.meter.function;
 
-import java.util.HashMap;
-import java.util.Map;
-import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.skywalking.oap.server.core.Const;
 import org.apache.skywalking.oap.server.core.UnexpectedException;
+import org.apache.skywalking.oap.server.core.analysis.meter.Meter;
 import org.apache.skywalking.oap.server.core.analysis.meter.MeterEntity;
 import org.apache.skywalking.oap.server.core.analysis.metrics.DataTable;
 import org.apache.skywalking.oap.server.core.analysis.metrics.Metrics;
 import org.apache.skywalking.oap.server.core.query.type.Bucket;
 import org.apache.skywalking.oap.server.core.remote.grpc.proto.RemoteData;
-import org.apache.skywalking.oap.server.core.storage.StorageBuilder;
+import org.apache.skywalking.oap.server.core.storage.StorageID;
+import org.apache.skywalking.oap.server.core.storage.annotation.BanyanDB;
 import org.apache.skywalking.oap.server.core.storage.annotation.Column;
+import org.apache.skywalking.oap.server.core.storage.annotation.ElasticSearch;
+import org.apache.skywalking.oap.server.core.storage.type.Convert2Entity;
+import org.apache.skywalking.oap.server.core.storage.type.Convert2Storage;
+import org.apache.skywalking.oap.server.core.storage.type.StorageBuilder;
+
+import java.util.Objects;
 
 /**
  * Histogram includes data range buckets and the amount matched/grouped in the buckets. This is for original histogram
  * graph visualization
  */
-@MeterFunction(functionName = "histogram")
+@MeterFunction(functionName = "sumHistogram")
 @Slf4j
-@EqualsAndHashCode(of = {
-    "entityId",
-    "timeBucket"
-})
 @ToString
-public abstract class HistogramFunction extends Metrics implements AcceptableValue<BucketedValues> {
+public abstract class HistogramFunction extends Meter implements AcceptableValue<BucketedValues> {
     public static final String DATASET = "dataset";
 
     @Setter
     @Getter
-    @Column(columnName = ENTITY_ID)
+    @ElasticSearch.EnableDocValues
+    @Column(name = ENTITY_ID, length = 512)
+    @BanyanDB.SeriesID(index = 0)
     private String entityId;
     @Getter
     @Setter
-    @Column(columnName = DATASET, dataType = Column.ValueDataType.HISTOGRAM, storageOnly = true, defaultValue = 0)
+    @Column(name = DATASET, dataType = Column.ValueDataType.HISTOGRAM, storageOnly = true, defaultValue = 0)
+    @BanyanDB.MeasureField
     private DataTable dataset = new DataTable(30);
 
     @Override
@@ -72,23 +75,24 @@ public abstract class HistogramFunction extends Metrics implements AcceptableVal
         final long[] values = value.getValues();
         for (int i = 0; i < values.length; i++) {
             final long bucket = value.getBuckets()[i];
-            String bucketName = bucket == Integer.MIN_VALUE ? Bucket.INFINITE_NEGATIVE : String.valueOf(bucket);
+            String bucketName = bucket == Long.MIN_VALUE ? Bucket.INFINITE_NEGATIVE : String.valueOf(bucket);
             final long bucketValue = values[i];
             dataset.valueAccumulation(bucketName, bucketValue);
         }
     }
 
     @Override
-    public void combine(final Metrics metrics) {
+    public boolean combine(final Metrics metrics) {
         HistogramFunction histogram = (HistogramFunction) metrics;
 
         if (!dataset.keysEqual(histogram.getDataset())) {
             log.warn("Incompatible input [{}}] for current HistogramFunction[{}], entity {}",
                      histogram, this, entityId
             );
-            return;
+            return true;
         }
         this.dataset.append(histogram.dataset);
+        return true;
     }
 
     @Override
@@ -101,7 +105,7 @@ public abstract class HistogramFunction extends Metrics implements AcceptableVal
         HistogramFunction metrics = (HistogramFunction) createNew();
         metrics.setEntityId(getEntityId());
         metrics.setTimeBucket(toTimeBucketInHour());
-        metrics.setDataset(getDataset());
+        metrics.getDataset().copyFrom(getDataset());
         return metrics;
     }
 
@@ -110,7 +114,7 @@ public abstract class HistogramFunction extends Metrics implements AcceptableVal
         HistogramFunction metrics = (HistogramFunction) createNew();
         metrics.setEntityId(getEntityId());
         metrics.setTimeBucket(toTimeBucketInDay());
-        metrics.setDataset(getDataset());
+        metrics.getDataset().copyFrom(getDataset());
         return metrics;
     }
 
@@ -141,38 +145,53 @@ public abstract class HistogramFunction extends Metrics implements AcceptableVal
     }
 
     @Override
-    public String id() {
-        return getTimeBucket() + Const.ID_CONNECTOR + entityId;
+    protected StorageID id0() {
+        return new StorageID()
+            .append(TIME_BUCKET, getTimeBucket())
+            .append(ENTITY_ID, getEntityId());
     }
 
     @Override
-    public Class<? extends StorageBuilder> builder() {
+    public Class<? extends HistogramFunctionBuilder> builder() {
         return HistogramFunctionBuilder.class;
     }
 
     public static class HistogramFunctionBuilder implements StorageBuilder<HistogramFunction> {
-
         @Override
-        public HistogramFunction map2Data(final Map<String, Object> dbMap) {
+        public HistogramFunction storage2Entity(final Convert2Entity converter) {
             HistogramFunction metrics = new HistogramFunction() {
                 @Override
                 public AcceptableValue<BucketedValues> createNew() {
                     throw new UnexpectedException("createNew should not be called");
                 }
             };
-            metrics.setDataset(new DataTable((String) dbMap.get(DATASET)));
-            metrics.setTimeBucket(((Number) dbMap.get(TIME_BUCKET)).longValue());
-            metrics.setEntityId((String) dbMap.get(ENTITY_ID));
+            metrics.setDataset(new DataTable((String) converter.get(DATASET)));
+            metrics.setTimeBucket(((Number) converter.get(TIME_BUCKET)).longValue());
+            metrics.setEntityId((String) converter.get(ENTITY_ID));
             return metrics;
         }
 
         @Override
-        public Map<String, Object> data2Map(final HistogramFunction storageData) {
-            Map<String, Object> map = new HashMap<>();
-            map.put(DATASET, storageData.getDataset());
-            map.put(TIME_BUCKET, storageData.getTimeBucket());
-            map.put(ENTITY_ID, storageData.getEntityId());
-            return map;
+        public void entity2Storage(final HistogramFunction storageData, final Convert2Storage converter) {
+            converter.accept(DATASET, storageData.getDataset());
+            converter.accept(TIME_BUCKET, storageData.getTimeBucket());
+            converter.accept(ENTITY_ID, storageData.getEntityId());
         }
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o)
+            return true;
+        if (!(o instanceof HistogramFunction))
+            return false;
+        HistogramFunction function = (HistogramFunction) o;
+        return Objects.equals(entityId, function.entityId) &&
+            getTimeBucket() == function.getTimeBucket();
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(entityId, getTimeBucket());
     }
 }

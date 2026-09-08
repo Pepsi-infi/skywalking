@@ -18,27 +18,33 @@
 
 package org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query;
 
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Objects;
+import org.apache.skywalking.library.elasticsearch.requests.search.BoolQueryBuilder;
+import org.apache.skywalking.library.elasticsearch.requests.search.Query;
+import org.apache.skywalking.library.elasticsearch.requests.search.RangeQueryBuilder;
+import org.apache.skywalking.library.elasticsearch.requests.search.Search;
+import org.apache.skywalking.library.elasticsearch.requests.search.SearchBuilder;
+import org.apache.skywalking.library.elasticsearch.requests.search.aggregation.Aggregation;
+import org.apache.skywalking.library.elasticsearch.requests.search.aggregation.BucketOrder;
+import org.apache.skywalking.library.elasticsearch.requests.search.aggregation.TermsAggregationBuilder;
+import org.apache.skywalking.library.elasticsearch.response.search.SearchResponse;
 import org.apache.skywalking.oap.server.core.analysis.metrics.Metrics;
 import org.apache.skywalking.oap.server.core.query.enumeration.Order;
+import org.apache.skywalking.oap.server.core.query.input.AttrCondition;
 import org.apache.skywalking.oap.server.core.query.input.Duration;
 import org.apache.skywalking.oap.server.core.query.input.TopNCondition;
 import org.apache.skywalking.oap.server.core.query.type.KeyValue;
 import org.apache.skywalking.oap.server.core.query.type.SelectedRecord;
 import org.apache.skywalking.oap.server.core.storage.query.IAggregationQueryDAO;
 import org.apache.skywalking.oap.server.library.client.elasticsearch.ElasticSearchClient;
+import org.apache.skywalking.oap.server.library.util.CollectionUtils;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.EsDAO;
-import org.elasticsearch.action.search.SearchResponse;
-import org.elasticsearch.index.query.BoolQueryBuilder;
-import org.elasticsearch.index.query.QueryBuilders;
-import org.elasticsearch.index.query.RangeQueryBuilder;
-import org.elasticsearch.search.aggregations.AggregationBuilders;
-import org.elasticsearch.search.aggregations.BucketOrder;
-import org.elasticsearch.search.aggregations.bucket.terms.Terms;
-import org.elasticsearch.search.aggregations.metrics.avg.Avg;
-import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.IndexController;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.TimeRangeIndexNameGenerator;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 public class AggregationQueryEsDAO extends EsDAO implements IAggregationQueryDAO {
 
@@ -50,50 +56,85 @@ public class AggregationQueryEsDAO extends EsDAO implements IAggregationQueryDAO
     public List<SelectedRecord> sortMetrics(final TopNCondition condition,
                                             final String valueColumnName,
                                             final Duration duration,
-                                            final List<KeyValue> additionalConditions) throws IOException {
-        SearchSourceBuilder sourceBuilder = SearchSourceBuilder.searchSource();
-        final RangeQueryBuilder queryBuilder = QueryBuilders.rangeQuery(Metrics.TIME_BUCKET)
-                                                            .lte(duration.getEndTimeBucket())
-                                                            .gte(duration.getStartTimeBucket());
+                                            final List<KeyValue> additionalConditions) {
+        final String realValueColumn = IndexController.LogicIndicesRegister.getPhysicalColumnName(condition.getName(), valueColumnName);
+        final RangeQueryBuilder basicQuery = Query.range(Metrics.TIME_BUCKET)
+                                                  .lte(duration.getEndTimeBucket())
+                                                  .gte(duration.getStartTimeBucket());
+        final BoolQueryBuilder boolQuery = Query.bool().must(basicQuery);
+        final SearchBuilder search = Search.builder();
 
-        boolean asc = false;
-        if (condition.getOrder().equals(Order.ASC)) {
-            asc = true;
-        }
-
-        if (additionalConditions != null && additionalConditions.size() > 0) {
-            BoolQueryBuilder boolQuery = QueryBuilders.boolQuery();
-            additionalConditions.forEach(additionalCondition -> {
-                boolQuery.must()
-                         .add(QueryBuilders.termsQuery(additionalCondition.getKey(), additionalCondition.getValue()));
+        final boolean asc = condition.getOrder().equals(Order.ASC);
+        List<AttrCondition> attributes = condition.getAttributes();
+        if (CollectionUtils.isNotEmpty(attributes)) {
+            attributes.forEach(attr -> {
+                if (attr.isEquals()) {
+                    boolQuery.must(Query.term(attr.getKey(), attr.getValue()));
+                } else {
+                    boolQuery.mustNot(Query.terms(attr.getKey(), attr.getValue()));
+                }
             });
-            boolQuery.must().add(queryBuilder);
-            sourceBuilder.query(boolQuery);
+        }
+
+        if (CollectionUtils.isEmpty(additionalConditions)
+            && IndexController.LogicIndicesRegister.isMergedTable(condition.getName())) {
+            boolQuery.must(Query.term(
+                         IndexController.LogicIndicesRegister.METRIC_TABLE_NAME,
+                         condition.getName()
+                     ));
+            search.query(boolQuery);
+        } else if (CollectionUtils.isEmpty(additionalConditions)) {
+            search.query(boolQuery);
+        } else if (CollectionUtils.isNotEmpty(additionalConditions)
+            && IndexController.LogicIndicesRegister.isMergedTable(condition.getName())) {
+            boolQuery.must(Query.term(
+                         IndexController.LogicIndicesRegister.METRIC_TABLE_NAME,
+                         condition.getName()
+                     ));
+            additionalConditions.forEach(additionalCondition -> boolQuery
+                .must(Query.terms(
+                    additionalCondition.getKey(),
+                    additionalCondition.getValue()
+                )));
+            search.query(boolQuery);
         } else {
-            sourceBuilder.query(queryBuilder);
+            additionalConditions.forEach(additionalCondition -> boolQuery
+                .must(Query.terms(
+                    additionalCondition.getKey(),
+                    additionalCondition.getValue()
+                )));
+            search.query(boolQuery);
         }
 
-        sourceBuilder.aggregation(
-            AggregationBuilders.terms(Metrics.ENTITY_ID)
-                               .field(Metrics.ENTITY_ID)
-                               .order(BucketOrder.aggregation(valueColumnName, asc))
-                               .size(condition.getTopN())
-                               .subAggregation(AggregationBuilders.avg(valueColumnName).field(valueColumnName))
-        );
+        search.aggregation(
+            Aggregation.terms(Metrics.ENTITY_ID)
+                       .field(Metrics.ENTITY_ID)
+                       .order(BucketOrder.aggregation(realValueColumn, asc))
+                       .size(condition.getTopN())
+                       .subAggregation(Aggregation.avg(realValueColumn).field(realValueColumn))
+                       .executionHint(TermsAggregationBuilder.ExecutionHint.MAP)
+                       .collectMode(TermsAggregationBuilder.CollectMode.BREADTH_FIRST)
+                       .build());
 
-        SearchResponse response = getClient().search(condition.getName(), sourceBuilder);
+        final SearchResponse response = searchDebuggable(new TimeRangeIndexNameGenerator(
+            IndexController.LogicIndicesRegister.getPhysicalTableName(condition.getName()),
+            duration.getStartTimeBucketInSec(),
+            duration.getEndTimeBucketInSec()), search.build());
 
-        List<SelectedRecord> topNList = new ArrayList<>();
-        Terms idTerms = response.getAggregations().get(Metrics.ENTITY_ID);
-        for (Terms.Bucket termsBucket : idTerms.getBuckets()) {
-            SelectedRecord record = new SelectedRecord();
-            record.setId(termsBucket.getKeyAsString());
-            Avg value = termsBucket.getAggregations().get(valueColumnName);
-            record.setValue(String.valueOf((long) value.getValue()));
-            topNList.add(record);
+        final List<SelectedRecord> topNList = new ArrayList<>();
+        if (Objects.nonNull(response.getAggregations())) {
+            final Map<String, Object> idTerms =
+                (Map<String, Object>) response.getAggregations().get(Metrics.ENTITY_ID);
+            final List<Map<String, Object>> buckets =
+                (List<Map<String, Object>>) idTerms.get("buckets");
+            for (Map<String, Object> termsBucket : buckets) {
+                SelectedRecord record = new SelectedRecord();
+                record.setId((String) termsBucket.get("key"));
+                Map<String, Object> value = (Map<String, Object>) termsBucket.get(realValueColumn);
+                record.setValue(String.valueOf(((Number) value.get("value")).longValue()));
+                topNList.add(record);
+            }
         }
-
         return topNList;
     }
-
 }

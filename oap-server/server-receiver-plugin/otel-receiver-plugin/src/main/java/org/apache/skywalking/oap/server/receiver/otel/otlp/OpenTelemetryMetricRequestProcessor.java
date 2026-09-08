@@ -1,0 +1,470 @@
+/*
+ *  Licensed to the Apache Software Foundation (ASF) under one or more
+ *  contributor license agreements.  See the NOTICE file distributed with
+ *  this work for additional information regarding copyright ownership.
+ *  The ASF licenses this file to You under the Apache License, Version 2.0
+ *  (the "License"); you may not use this file except in compliance with
+ *  the License.  You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+package org.apache.skywalking.oap.server.receiver.otel.otlp;
+
+import com.google.common.base.Splitter;
+import com.google.common.collect.ImmutableMap;
+import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
+import io.opentelemetry.proto.common.v1.AnyValue;
+import io.opentelemetry.proto.common.v1.KeyValue;
+import io.opentelemetry.proto.metrics.v1.DataPointFlags;
+import io.opentelemetry.proto.metrics.v1.Sum;
+import io.opentelemetry.proto.metrics.v1.SummaryDataPoint;
+import io.vavr.Function1;
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.skywalking.oap.meter.analyzer.v2.MalConverterRegistry;
+import org.apache.skywalking.oap.meter.analyzer.v2.MetricConvert;
+import org.apache.skywalking.oap.meter.analyzer.v2.dsl.SampleFamily;
+import org.apache.skywalking.oap.meter.analyzer.v2.dsl.debug.MalStaticBindingHook;
+import org.apache.skywalking.oap.meter.analyzer.v2.prometheus.PrometheusMetricConverter;
+import org.apache.skywalking.oap.meter.analyzer.v2.prometheus.rule.Rule;
+import org.apache.skywalking.oap.meter.analyzer.v2.prometheus.rule.Rules;
+import org.apache.skywalking.oap.server.core.CoreModule;
+import org.apache.skywalking.oap.server.core.analysis.meter.MeterSystem;
+import org.apache.skywalking.oap.server.library.module.ModuleManager;
+import org.apache.skywalking.oap.server.library.module.ModuleStartException;
+import org.apache.skywalking.oap.server.library.module.Service;
+import org.apache.skywalking.oap.server.library.util.prometheus.metrics.Counter;
+import org.apache.skywalking.oap.server.library.util.prometheus.metrics.Gauge;
+import org.apache.skywalking.oap.server.library.util.prometheus.metrics.Histogram;
+import org.apache.skywalking.oap.server.library.util.prometheus.metrics.Metric;
+import org.apache.skywalking.oap.server.library.util.prometheus.metrics.Summary;
+import org.apache.skywalking.oap.server.receiver.otel.OtelMetricReceiverConfig;
+import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
+import org.apache.skywalking.oap.server.telemetry.api.HistogramMetrics;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsCreator;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsTag;
+
+import java.io.IOException;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Stream;
+
+import static io.opentelemetry.proto.metrics.v1.AggregationTemporality.AGGREGATION_TEMPORALITY_DELTA;
+import static io.opentelemetry.proto.metrics.v1.AggregationTemporality.AGGREGATION_TEMPORALITY_UNSPECIFIED;
+import static java.util.stream.Collectors.toMap;
+
+@RequiredArgsConstructor
+@Slf4j
+public class OpenTelemetryMetricRequestProcessor implements Service, MalConverterRegistry {
+
+    private final ModuleManager manager;
+
+    private final OtelMetricReceiverConfig config;
+
+    /**
+     * Fallback label mappings: if the target label (value) is absent in resource attributes,
+     * copy the source label (key) value as the target. The source label is always kept as-is
+     * (with dots converted to underscores by the first pass).
+     *
+     * <p>The {@code service.name → job_name} mapping is required because the
+     * <a href="https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/receiver/prometheusreceiver/README.md">
+     * OTel Collector Prometheus Receiver</a> automatically converts the Prometheus {@code job}
+     * label to the {@code service.name} resource attribute. All Prometheus-based monitoring
+     * integrations (VM, Nginx, Redis, etc.) depend on this being available as {@code job_name}
+     * in MAL rules. When {@code job_name} is set explicitly in resource attributes (e.g., by
+     * Envoy AI Gateway), it takes precedence via {@code putIfAbsent}.
+     *
+     * <p><b>Legacy:</b> The {@code net.host.name} and {@code host.name} mappings to
+     * {@code node_identifier_host_name} are kept for backward compatibility with existing
+     * VM/Windows MAL rules. New integrations should NOT add entries here — use the natural
+     * dot-to-underscore conversion instead (e.g., {@code host.name} becomes {@code host_name}).
+     */
+    private static final Map<String, String> FALLBACK_LABEL_MAPPINGS =
+        ImmutableMap
+            .<String, String>builder()
+            // Legacy: use host_name (dot-to-underscore) for new integrations instead
+            .put("net.host.name", "node_identifier_host_name")
+            .put("host.name", "node_identifier_host_name")
+            // OTel Collector Prometheus Receiver converts Prometheus `job` to `service.name`.
+            // All Prometheus-based MAL rules filter by job_name. When job_name is set explicitly
+            // in resource attributes (e.g., Envoy AI Gateway), it takes precedence via putIfAbsent.
+            .put("service.name", "job_name")
+            .build();
+    /**
+     * Active MAL converters, keyed by {@code "<catalog>:<rule-name>"} so boot-time entries and
+     * runtime-rule entries share one namespace. A runtime {@code /addOrUpdate} for a rule that
+     * already has a static version replaces the boot entry in place, avoiding double-dispatch
+     * on ingest samples; a runtime {@code /inactivate} teardown removes the entry cleanly.
+     *
+     * <p>Volatile + copy-on-write: readers in {@link #processMetricsRequest} and {@link #toMeter}
+     * observe a consistent snapshot without taking a lock; writers replace the reference under
+     * {@link #convertersWriteLock}. Iteration order is preserved by {@link LinkedHashMap} so
+     * the behaviour matches the pre-refactor {@code List} ordering for static rules.
+     */
+    private volatile Map<String, MetricConvert> converters = Collections.emptyMap();
+    private final Object convertersWriteLock = new Object();
+
+    /**
+     * Catalog identifier for the {@link OpenTelemetryMetricRequestProcessor}'s MAL rules.
+     * Matches the on-disk directory name and the runtime-rule catalog — the REST handler
+     * rejects requests under any other catalog so the key namespace stays aligned.
+     */
+    private static final String OTEL_CATALOG = "otel-rules";
+
+    @Getter(lazy = true)
+    private final MetricsCreator metricsCreator = manager.find(TelemetryModule.NAME).provider().getService(MetricsCreator.class);
+
+    @Getter(lazy = true)
+    private final HistogramMetrics processHistogram = getMetricsCreator().createHistogramMetric(
+        "otel_metrics_latency",
+        "The latency to process the metrics request",
+        MetricsTag.EMPTY_KEY,
+        MetricsTag.EMPTY_VALUE,
+        .005, .01, .025, .05, .075, .1, .25, .5, .75, 1, 2.5, 5, 7.5, 10, 15, 30, 60, 120
+    );
+
+    public void processMetricsRequest(final ExportMetricsServiceRequest requests) {
+        try (final var unused = getProcessHistogram().createTimer()) {
+            requests.getResourceMetricsList().forEach(request -> {
+                if (log.isDebugEnabled()) {
+                    log.debug("Resource attributes: {}", request.getResource().getAttributesList());
+                }
+
+                // First pass: collect all resource attributes with dots replaced by underscores
+                final Map<String, String> nodeLabels = new HashMap<>();
+                for (final var it : request.getResource().getAttributesList()) {
+                    final String key = it.getKey().replace('.', '_');
+                    final String value = anyValueToString(it.getValue());
+                    nodeLabels.putIfAbsent(key, value);
+                }
+                // Second pass: apply fallback mappings — only if the target key is absent
+                for (final var it : request.getResource().getAttributesList()) {
+                    final String targetKey = FALLBACK_LABEL_MAPPINGS.get(it.getKey());
+                    if (targetKey != null) {
+                        nodeLabels.putIfAbsent(targetKey, anyValueToString(it.getValue()));
+                    }
+                }
+
+                ImmutableMap<String, SampleFamily> sampleFamilies = PrometheusMetricConverter.convertPromMetricToSampleFamily(
+                    request.getScopeMetricsList().stream()
+                           .flatMap(scopeMetrics -> scopeMetrics
+                               .getMetricsList().stream()
+                               .flatMap(metric -> adaptMetrics(nodeLabels, metric))
+                               .map(Function1.liftTry(Function.identity()))
+                               .flatMap(tryIt -> MetricConvert.log(tryIt, "Convert OTEL metric to prometheus metric"))
+                           )
+                );
+                converters.values().forEach(convert -> convert.toMeter(sampleFamilies));
+            });
+        }
+    }
+
+    /**
+     * Push pre-built sample families into the MAL pipeline.
+     * Used by SpanListeners (e.g., IOSMetricKitSpanListener) that extract
+     * metrics from OTLP spans and need to feed them through the same
+     * MAL converters configured via enabledOtelMetricsRules.
+     */
+    public void toMeter(final ImmutableMap<String, SampleFamily> sampleFamilies) {
+        converters.values().forEach(convert -> convert.toMeter(sampleFamilies));
+    }
+
+    /**
+     * Install or replace a single MAL converter identified by {@code key}. Thread-safe against
+     * concurrent readers and other writers; readers observe either the pre-call snapshot or the
+     * post-call snapshot, never a torn intermediate state. Called by the runtime-rule plugin
+     * when an operator's {@code /addOrUpdate} commits a new MAL bundle under the
+     * {@code otel-rules} catalog; boot-time loading also uses this method so there is exactly
+     * one installation path.
+     */
+    @Override
+    public void addOrReplaceConverter(final String key, final MetricConvert convert) {
+        synchronized (convertersWriteLock) {
+            final Map<String, MetricConvert> copy = new LinkedHashMap<>(converters);
+            copy.put(key, convert);
+            converters = Collections.unmodifiableMap(copy);
+        }
+    }
+
+    /**
+     * Drop the MAL converter previously installed under {@code key}. No-op if the key is not
+     * present — {@code /delete} on a runtime rule that already tore down on this node shouldn't
+     * surface an error.
+     */
+    @Override
+    public void removeConverter(final String key) {
+        synchronized (convertersWriteLock) {
+            if (!converters.containsKey(key)) {
+                return;
+            }
+            final Map<String, MetricConvert> copy = new LinkedHashMap<>(converters);
+            copy.remove(key);
+            converters = Collections.unmodifiableMap(copy);
+        }
+    }
+
+    public void start() throws ModuleStartException {
+        final List<String> enabledRules =
+            Splitter.on(",")
+                    .omitEmptyStrings()
+                    .trimResults()
+                    .splitToList(config.getEnabledOtelMetricsRules());
+        final List<Rule> rules;
+        try {
+            rules = Rules.loadRules("otel-rules", enabledRules);
+        } catch (IOException e) {
+            throw new ModuleStartException("Failed to load otel rules.", e);
+        }
+
+        if (rules.isEmpty()) {
+            return;
+        }
+        final MeterSystem meterSystem = manager.find(CoreModule.NAME).provider().getService(MeterSystem.class);
+
+        for (final Rule rule : rules) {
+            final MetricConvert convert = new MetricConvert(rule, meterSystem);
+            addOrReplaceConverter(OTEL_CATALOG + ":" + rule.getName(), convert);
+            // Publish per-metric debug holders into the dsl-debugging registry (no-op
+            // if the dsl-debugging module is not enabled — the hook's default sink
+            // discards the call).
+            MalStaticBindingHook.publish(OTEL_CATALOG, rule.getName(), convert);
+        }
+    }
+
+    private static Map<String, String> buildLabels(List<KeyValue> kvs) {
+        return kvs
+            .stream()
+            .collect(toMap(
+                it -> it.getKey().replace('.', '_'),
+                it -> anyValueToString(it.getValue()),
+                (v1, v2) -> v1
+            ));
+    }
+
+    private static Map<String, String> mergeLabels(
+        final Map<String, String> nodeLabels,
+        final Map<String, String> pointLabels) {
+
+        // data point labels should have higher precedence and override the one in node labels
+
+        final Map<String, String> result = new HashMap<>(nodeLabels);
+        result.putAll(pointLabels);
+        return result;
+    }
+
+    private static Map<Double, Long> buildBuckets(
+        final List<Long> bucketCounts,
+        final List<Double> explicitBounds) {
+
+        final Map<Double, Long> result = new HashMap<>();
+        for (int i = 0; i < explicitBounds.size(); i++) {
+            result.put(explicitBounds.get(i), bucketCounts.get(i));
+        }
+        result.put(Double.POSITIVE_INFINITY, bucketCounts.get(explicitBounds.size()));
+        return result;
+    }
+
+    /**
+     * ExponentialHistogram data points are an alternate representation to the Histogram data point in OpenTelemetry
+     * metric format(https://opentelemetry.io/docs/reference/specification/metrics/data-model/#exponentialhistogram).
+     * It uses scale, offset and bucket index to calculate the bound. Firstly, calculate the base using scale by
+     * formula: base = 2**(2**(-scale)). Then the upperBound of specific bucket can be calculated by formula:
+     * base**(offset+index+1). Above calculation way is about positive buckets. For the negative case, we just
+     * map them by their absolute value into the negative range using the same scale as the positive range. So the
+     * upperBound should be calculated as -base**(offset+index).
+     *
+     * Ignored the zero_count field temporarily,
+     * because the zero_threshold even could overlap the existing bucket scopes.
+     *
+     * @param positiveOffset       corresponding to positive Buckets' offset in ExponentialHistogramDataPoint
+     * @param positiveBucketCounts corresponding to positive Buckets' bucket_counts in ExponentialHistogramDataPoint
+     * @param negativeOffset       corresponding to negative Buckets' offset in ExponentialHistogramDataPoint
+     * @param negativeBucketCounts corresponding to negative Buckets' bucket_counts in ExponentialHistogramDataPoint
+     * @param scale                corresponding to scale in ExponentialHistogramDataPoint
+     * @return The map is a bucket set for histogram, the key is specific bucket's upperBound, the value is item count
+     * in this bucket lower than or equals to key(upperBound)
+     */
+    private static Map<Double, Long> buildBucketsFromExponentialHistogram(
+        int positiveOffset, final List<Long> positiveBucketCounts,
+        int negativeOffset, final List<Long> negativeBucketCounts, int scale) {
+
+        final Map<Double, Long> result = new HashMap<>();
+        double base = Math.pow(2.0, Math.pow(2.0, -scale));
+        if (base == Double.POSITIVE_INFINITY) {
+            log.warn("Receive and reject out-of-range ExponentialHistogram data");
+            return result;
+        }
+        double upperBound;
+        for (int i = 0; i < negativeBucketCounts.size(); i++) {
+            upperBound = -Math.pow(base, negativeOffset + i);
+            if (upperBound == Double.NEGATIVE_INFINITY) {
+                log.warn("Receive and reject out-of-range ExponentialHistogram data");
+                return new HashMap<>();
+            }
+            result.put(upperBound, negativeBucketCounts.get(i));
+        }
+        for (int i = 0; i < positiveBucketCounts.size() - 1; i++) {
+            upperBound = Math.pow(base, positiveOffset + i + 1);
+            if (upperBound == Double.POSITIVE_INFINITY) {
+                log.warn("Receive and reject out-of-range ExponentialHistogram data");
+                return new HashMap<>();
+            }
+            result.put(upperBound, positiveBucketCounts.get(i));
+        }
+        result.put(Double.POSITIVE_INFINITY, positiveBucketCounts.get(positiveBucketCounts.size() - 1));
+        return result;
+    }
+
+    // Adapt the OpenTelemetry metrics to SkyWalking metrics
+    private Stream<? extends Metric> adaptMetrics(
+        final Map<String, String> nodeLabels,
+        final io.opentelemetry.proto.metrics.v1.Metric metric) {
+        if (metric.hasGauge()) {
+            return metric.getGauge().getDataPointsList().stream().filter(point -> 
+                (point.getFlags() & DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE) != DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE)
+                         .map(point -> new Gauge(
+                             metric.getName(),
+                             mergeLabels(
+                                 nodeLabels,
+                                 buildLabels(point.getAttributesList())
+                             ),
+                             point.hasAsDouble() ? point.getAsDouble()
+                                 : point.getAsInt(),
+                             point.getTimeUnixNano() / 1000000
+                         ));
+        }
+        if (metric.hasSum()) {
+            final Sum sum = metric.getSum();
+            if (sum
+                .getAggregationTemporality() == AGGREGATION_TEMPORALITY_UNSPECIFIED) {
+                return Stream.empty();
+            }
+            if (sum
+                .getAggregationTemporality() == AGGREGATION_TEMPORALITY_DELTA) {
+                return sum.getDataPointsList().stream().filter(point -> 
+                    (point.getFlags() & DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE) != DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE)
+                          .map(point -> new Gauge(
+                              metric.getName(),
+                              mergeLabels(
+                                  nodeLabels,
+                                  buildLabels(point.getAttributesList())
+                              ),
+                              point.hasAsDouble() ? point.getAsDouble()
+                                  : point.getAsInt(),
+                              point.getTimeUnixNano() / 1000000
+                          ));
+            }
+            if (sum.getIsMonotonic()) {
+                return sum.getDataPointsList().stream().filter(point ->
+                    (point.getFlags() & DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE) != DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE)
+                          .map(point -> new Counter(
+                              metric.getName(),
+                              mergeLabels(
+                                  nodeLabels,
+                                  buildLabels(point.getAttributesList())
+                              ),
+                              point.hasAsDouble() ? point.getAsDouble()
+                                  : point.getAsInt(),
+                              point.getTimeUnixNano() / 1000000
+                          ));
+            } else {
+                return sum.getDataPointsList().stream().filter(point ->
+                    (point.getFlags() & DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE) != DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE)
+                          .map(point -> new Gauge(
+                              metric.getName(),
+                              mergeLabels(
+                                  nodeLabels,
+                                  buildLabels(point.getAttributesList())
+                              ),
+                              point.hasAsDouble() ? point.getAsDouble()
+                                  : point.getAsInt(),
+                              point.getTimeUnixNano() / 1000000
+                          ));
+            }
+        }
+        if (metric.hasHistogram()) {
+            return metric.getHistogram().getDataPointsList().stream().filter(point ->
+                    (point.getFlags() & DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE) != DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE)
+                         .map(point -> new Histogram(
+                             metric.getName(),
+                             mergeLabels(
+                                 nodeLabels,
+                                 buildLabels(point.getAttributesList())
+                             ),
+                             point.getCount(),
+                             point.getSum(),
+                             buildBuckets(
+                                 point.getBucketCountsList(),
+                                 point.getExplicitBoundsList()
+                             ),
+                             point.getTimeUnixNano() / 1000000
+                         ));
+        }
+        if (metric.hasExponentialHistogram()) {
+            return metric.getExponentialHistogram().getDataPointsList().stream().filter(point ->
+                    (point.getFlags() & DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE) != DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE)
+                         .map(point -> new Histogram(
+                             metric.getName(),
+                             mergeLabels(
+                                 nodeLabels,
+                                 buildLabels(point.getAttributesList())
+                             ),
+                             point.getCount(),
+                             point.getSum(),
+                             buildBucketsFromExponentialHistogram(
+                                 point.getPositive().getOffset(),
+                                 point.getPositive().getBucketCountsList(),
+                                 point.getNegative().getOffset(),
+                                 point.getNegative().getBucketCountsList(),
+                                 point.getScale()
+                             ),
+                             point.getTimeUnixNano() / 1000000
+                         ));
+        }
+        if (metric.hasSummary()) {
+            return metric.getSummary().getDataPointsList().stream().filter(point ->
+                    (point.getFlags() & DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE) != DataPointFlags.FLAG_NO_RECORDED_VALUE_VALUE)
+                         .map(point -> new Summary(
+                             metric.getName(),
+                             mergeLabels(
+                                 nodeLabels,
+                                 buildLabels(point.getAttributesList())
+                             ),
+                             point.getCount(),
+                             point.getSum(),
+                             point.getQuantileValuesList().stream().collect(
+                                 toMap(
+                                     SummaryDataPoint.ValueAtQuantile::getQuantile,
+                                     SummaryDataPoint.ValueAtQuantile::getValue
+                                 )),
+                             point.getTimeUnixNano() / 1000000
+                         ));
+        }
+        throw new UnsupportedOperationException("Unsupported type");
+    }
+
+    public static String anyValueToString(AnyValue value) {
+        if (value.hasBoolValue()) {
+            return Boolean.toString(value.getBoolValue());
+        } else if (value.hasIntValue()) {
+            return Long.toString(value.getIntValue());
+        } else if (value.hasDoubleValue()) {
+            return Double.toString(value.getDoubleValue());
+        } else {
+            return value.getStringValue();
+        }
+    }
+
+}

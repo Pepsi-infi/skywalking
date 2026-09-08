@@ -1,0 +1,176 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+services:
+  oap:
+    image: skywalking/oap:latest
+    expose:
+      - 11800
+      - 12800
+      - 10051
+      - 5005
+    networks:
+      - e2e
+    volumes:
+      - ./../prepare/setup-oap/download-mysql.sh:/download-mysql.sh
+      - ./../prepare/setup-oap/log4j2.xml:/skywalking/config/log4j2.xml
+    environment:
+      SW_HEALTH_CHECKER: default
+      SW_CLUSTER_ZK_HOST_PORT: zk:2181
+      SW_STORAGE_ES_CLUSTER_NODES: es:9200
+      SW_JDBC_URL: jdbc:mysql://mysql:3306/swtest?allowMultiQueries=true
+      SW_STORAGE_BANYANDB_TARGETS: banyandb:17912
+      SW_CONFIG_ETCD_PERIOD: 1
+      SW_CONFIG_ETCD_ENDPOINTS: etcd:2379
+      SW_CLUSTER_ETCD_ENDPOINTS: etcd:2379
+    healthcheck:
+      test: ["CMD", "bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/11800"]
+      interval: 5s
+      timeout: 60s
+      retries: 120
+      # OAP installs ~3000 BanyanDB measure schemas at boot — under Docker
+      # Desktop on Mac (or any rate-limited daemon) the install can take
+      # 60-120s before the gRPC port is ready. start_period gives that
+      # initial window without counting failed probes against the retry
+      # budget; without it, sequential compose-up/down cycles flake on
+      # the second/third case in a batch.
+      start_period: 90s
+
+  banyandb:
+    image: "ghcr.io/apache/skywalking-banyandb:${SW_BANYANDB_COMMIT}"
+    networks:
+      - e2e
+    ports:
+      - 17912:17912
+      - 17913:17913
+    # Access log flags are for debugging only. Uncomment when investigating e2e failures:
+    # --enable-ingestion-access-log --enable-query-access-log --access-log-root-path /tmp
+    command: standalone --measure-metadata-cache-wait-duration 1m --stream-metadata-cache-wait-duration 1m
+    healthcheck:
+      test: [ "CMD", "sh", "-c", "nc -nz 127.0.0.1 17912" ]
+      interval: 5s
+      timeout: 60s
+      retries: 120
+
+  banyandb-data:
+    image: "ghcr.io/apache/skywalking-banyandb:${SW_BANYANDB_COMMIT}-testing"
+    hostname: data
+    expose:
+      - 17912
+      - 2121
+      - 6060
+    # BanyanDB 0.11+ uses file/DNS node discovery (no etcd). Cluster cases mount their own
+    # nodes.yaml at this path and add --node-labels / --data-node-selector as needed.
+    command: data --node-discovery-mode=file --node-discovery-file-path=/etc/banyandb/nodes.yaml
+    healthcheck:
+      test: [ "CMD", "./bydbctl", "health", "--addr=http://127.0.0.1:17913" ]
+      interval: 5s
+      timeout: 120s
+      retries: 120
+
+  liaison:
+    image: "ghcr.io/apache/skywalking-banyandb:${SW_BANYANDB_COMMIT}-testing"
+    hostname: liaison
+    ports:
+      - 17913:17913
+      - 17912:17912
+    expose:
+      - 2121
+      - 6060
+    command: liaison --node-discovery-mode=file --node-discovery-file-path=/etc/banyandb/nodes.yaml --measure-metadata-cache-wait-duration 1m --stream-metadata-cache-wait-duration 1m
+    healthcheck:
+      test: [ "CMD", "./bydbctl", "health", "--addr=http://liaison:17913" ]
+      interval: 5s
+      timeout: 120s
+      retries: 120
+
+  etcd:
+    image: gcr.io/etcd-development/etcd:v3.5.9
+    ports:
+      - "2379:2379"
+    command: etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://etcd:2379 --max-request-bytes 10485760 --backend-batch-limit 10000
+    healthcheck:
+      test: [ "CMD", "etcdctl", "endpoint", "health" ]
+      interval: 1m30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  provider:
+    image: "ghcr.io/apache/skywalking-java/skywalking-java:${SW_AGENT_JAVA_COMMIT}-java${SW_AGENT_JDK_VERSION}"
+    volumes:
+      - ./../../java-test-service/e2e-service-provider/target/e2e-service-provider-2.0.0.jar:/services_provider.jar
+    command: [ "java", "-jar", "/services_provider.jar" ]
+    networks:
+      - e2e
+    expose:
+      - 9090
+      - 5005
+    environment:
+      SW_AGENT_COLLECTOR_BACKEND_SERVICES: oap:11800
+      SW_LOGGING_OUTPUT: CONSOLE
+      SW_AGENT_NAME: e2e-service-provider
+      SW_AGENT_INSTANCE_NAME: provider1
+      SW_AGENT_COLLECTOR_GET_PROFILE_TASK_INTERVAL: 1
+      SW_AGENT_COLLECTOR_GET_AGENT_DYNAMIC_CONFIG_INTERVAL: 1
+      SW_METER_ACTIVE: 'false'
+    healthcheck:
+      test: ["CMD", "bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/9090"]
+      interval: 5s
+      timeout: 60s
+      retries: 120
+
+  consumer:
+    image: "ghcr.io/apache/skywalking-java/skywalking-java:${SW_AGENT_JAVA_COMMIT}-java${SW_AGENT_JDK_VERSION}"
+    volumes:
+      - ../../java-test-service/e2e-service-consumer/target/e2e-service-consumer-2.0.0.jar:/services_consumer.jar
+    command: ["java", "-jar", "/services_consumer.jar"]
+    networks:
+      - e2e
+    expose:
+      - 9092
+      - 5005
+    environment:
+      SW_AGENT_COLLECTOR_BACKEND_SERVICES: oap:11800
+      SW_LOGGING_OUTPUT: CONSOLE
+      PROVIDER_URL: http://provider:9090
+      SW_AGENT_NAME: e2e-service-consumer
+      SW_AGENT_INSTANCE_NAME: consumer1
+      SW_AGENT_COLLECTOR_GET_PROFILE_TASK_INTERVAL: 1
+      SW_AGENT_COLLECTOR_GET_AGENT_DYNAMIC_CONFIG_INTERVAL: 1
+      SW_METER_ACTIVE: 'false'
+    healthcheck:
+      test: ["CMD", "bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/9092"]
+      interval: 5s
+      timeout: 60s
+      retries: 120
+
+  baseline-predictor:
+    image: "ghcr.io/skyapm/skypredictor:${SW_PREDICTOR_COMMIT}"
+    networks:
+      - e2e
+    expose:
+      - 18080
+    environment:
+      BASELINE_FETCH_SERVER_ENDPOINT: http://oap:12800
+      LOGGING_LEVEL: DEBUG
+    healthcheck:
+      test: [ "CMD", "bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/18080" ]
+      interval: 5s
+      timeout: 60s
+      retries: 120
+
+networks:
+  e2e:

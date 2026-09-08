@@ -18,8 +18,8 @@
 
 package org.apache.skywalking.oap.server.core.analysis;
 
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class IDManagerTest {
     @Test
@@ -31,22 +31,22 @@ public class IDManagerTest {
         final IDManager.ServiceID.ServiceIDDefinition relationDefine = IDManager.ServiceID.analysisId(
             IDManager.ServiceID.buildId(
                 "Service",
-                NodeType.Normal
+                true
             ));
-        Assert.assertEquals(define, relationDefine);
+        Assertions.assertEquals(define, relationDefine);
     }
 
     @Test
     public void testServiceRelationID() {
         IDManager.ServiceID.ServiceRelationDefine define = new IDManager.ServiceID.ServiceRelationDefine(
-            IDManager.ServiceID.buildId("ServiceSource", NodeType.Normal),
-            IDManager.ServiceID.buildId("ServiceDest", NodeType.Normal)
+            IDManager.ServiceID.buildId("ServiceSource", true),
+            IDManager.ServiceID.buildId("ServiceDest", true)
         );
 
         final String relationId = IDManager.ServiceID.buildRelationId(define);
         final IDManager.ServiceID.ServiceRelationDefine serviceRelationDefine = IDManager.ServiceID.analysisRelationId(
             relationId);
-        Assert.assertEquals(define, serviceRelationDefine);
+        Assertions.assertEquals(define, serviceRelationDefine);
     }
 
 }

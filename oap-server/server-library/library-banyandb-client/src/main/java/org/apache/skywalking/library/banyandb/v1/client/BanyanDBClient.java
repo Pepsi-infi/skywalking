@@ -1,0 +1,1340 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+package org.apache.skywalking.library.banyandb.v1.client;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
+import com.google.protobuf.Timestamp;
+import io.grpc.Channel;
+import io.grpc.ClientInterceptors;
+import io.grpc.ManagedChannel;
+import io.grpc.Status;
+import java.io.Closeable;
+import java.io.IOException;
+import java.net.URI;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Collectors;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.skywalking.banyandb.bydbql.v1.BanyandbBydbql;
+import org.apache.skywalking.banyandb.bydbql.v1.BydbQLServiceGrpc;
+import org.apache.skywalking.banyandb.common.v1.BanyandbCommon;
+import org.apache.skywalking.banyandb.common.v1.BanyandbCommon.Group;
+import org.apache.skywalking.banyandb.common.v1.BanyandbCommon.Metadata;
+import org.apache.skywalking.banyandb.common.v1.ServiceGrpc;
+import org.apache.skywalking.banyandb.database.v1.BanyandbDatabase.IndexRule;
+import org.apache.skywalking.banyandb.database.v1.BanyandbDatabase.IndexRuleBinding;
+import org.apache.skywalking.banyandb.database.v1.BanyandbDatabase.Measure;
+import org.apache.skywalking.banyandb.database.v1.BanyandbDatabase.Property;
+import org.apache.skywalking.banyandb.database.v1.BanyandbDatabase.Stream;
+import org.apache.skywalking.banyandb.database.v1.BanyandbDatabase.Subject;
+import org.apache.skywalking.banyandb.database.v1.BanyandbDatabase.TopNAggregation;
+import org.apache.skywalking.banyandb.database.v1.BanyandbDatabase.Trace;
+import org.apache.skywalking.banyandb.measure.v1.BanyandbMeasure;
+import org.apache.skywalking.banyandb.measure.v1.MeasureServiceGrpc;
+import org.apache.skywalking.banyandb.model.v1.BanyandbModel;
+import org.apache.skywalking.banyandb.property.v1.BanyandbProperty;
+import org.apache.skywalking.banyandb.stream.v1.BanyandbStream;
+import org.apache.skywalking.banyandb.stream.v1.StreamServiceGrpc;
+import org.apache.skywalking.banyandb.trace.v1.BanyandbTrace;
+import org.apache.skywalking.banyandb.trace.v1.TraceServiceGrpc;
+import org.apache.skywalking.library.banyandb.v1.client.auth.AuthInterceptor;
+import org.apache.skywalking.library.banyandb.v1.client.grpc.HandleExceptionsWith;
+import org.apache.skywalking.library.banyandb.v1.client.metadata.Serializable;
+import org.apache.skywalking.library.banyandb.v1.client.grpc.channel.ChannelManager;
+import org.apache.skywalking.library.banyandb.v1.client.grpc.channel.DefaultChannelFactory;
+import org.apache.skywalking.library.banyandb.v1.client.grpc.exception.BanyanDBException;
+import org.apache.skywalking.library.banyandb.v1.client.metadata.GroupMetadataRegistry;
+import org.apache.skywalking.library.banyandb.v1.client.metadata.IndexRuleBindingMetadataRegistry;
+import org.apache.skywalking.library.banyandb.v1.client.metadata.IndexRuleMetadataRegistry;
+import org.apache.skywalking.library.banyandb.v1.client.grpc.MetadataClient;
+import org.apache.skywalking.library.banyandb.v1.client.metadata.MeasureMetadataRegistry;
+import org.apache.skywalking.library.banyandb.v1.client.metadata.PropertyMetadataRegistry;
+import org.apache.skywalking.library.banyandb.v1.client.metadata.ResourceExist;
+import org.apache.skywalking.library.banyandb.v1.client.metadata.StreamMetadataRegistry;
+import org.apache.skywalking.library.banyandb.v1.client.metadata.TopNAggregationMetadataRegistry;
+import org.apache.skywalking.library.banyandb.v1.client.metadata.TraceMetadataRegistry;
+import org.apache.skywalking.library.banyandb.v1.client.util.TimeUtils;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
+/**
+ * BanyanDBClient represents a client instance interacting with BanyanDB server.
+ * This is built on the top of BanyanDB v1 gRPC APIs.
+ *
+ * <pre>{@code
+ * // use `default` group
+ * client = new BanyanDBClient("127.0.0.1", 17912);
+ * // to send any request, a connection to the server must be estabilished
+ * client.connect();
+ * }</pre>
+ */
+@Slf4j
+public class BanyanDBClient implements Closeable {
+    public static final ZonedDateTime DEFAULT_EXPIRE_AT = ZonedDateTime.of(2099, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+    private final String[] targets;
+    /**
+     * Options for server connection.
+     */
+    @Getter
+    private final Options options;
+    /**
+     * gRPC connection.
+     */
+    @Getter
+    private volatile Channel channel;
+    /**
+     * Lazy-initialised wrapper over {@code SchemaBarrierService}. First access after
+     * the channel is wired creates the watcher; nullable until then so that callers
+     * which never need a schema fence don't pay the construction cost.
+     */
+    private volatile SchemaWatcher schemaWatcher;
+    /**
+     * gRPC client stub
+     */
+    @Getter
+    private StreamServiceGrpc.StreamServiceStub streamServiceStub;
+    /**
+     * gRPC client stub
+     */
+    @Getter
+    private MeasureServiceGrpc.MeasureServiceStub measureServiceStub;
+    /**
+     * gRPC client stub
+     */
+    @Getter
+    private TraceServiceGrpc.TraceServiceStub traceServiceStub;
+    /**
+     * gRPC future stub.
+     */
+    @Getter
+    private StreamServiceGrpc.StreamServiceBlockingStub streamServiceBlockingStub;
+    /**
+     * gRPC future stub.
+     */
+    @Getter
+    private MeasureServiceGrpc.MeasureServiceBlockingStub measureServiceBlockingStub;
+    /**
+     * gRPC future stub.
+     */
+    @Getter
+    private TraceServiceGrpc.TraceServiceBlockingStub traceServiceBlockingStub;
+    /**
+     * gRPC blocking stub for BydbQL queries.
+     */
+    private BydbQLServiceGrpc.BydbQLServiceBlockingStub bydbQLServiceBlockingStub;
+    /**
+     * The connection status.
+     */
+    private volatile boolean isConnected = false;
+    /**
+     * A lock to control the race condition in establishing and disconnecting network connection.
+     */
+    private final ReentrantLock connectionEstablishLock;
+    /**
+     * Created up-front rather than in {@link #connect()} so that {@link #updateCredentials} works
+     * before the first connection and survives every channel swap {@code ChannelManager} performs.
+     */
+    private final AuthInterceptor authInterceptor = new AuthInterceptor(null, null);
+    /**
+     * The manager behind {@link #channel}, kept so {@link #rebuildChannel()} can reload the TLS material.
+     * Null until {@link #connect()} runs, and for the test-only channel injection.
+     */
+    private volatile ChannelManager channelManager;
+
+    /**
+     * Create a BanyanDB client instance with a default options.
+     *
+     * @param targets server targets
+     */
+    public BanyanDBClient(String... targets) {
+        this(targets, new Options());
+    }
+
+    /**
+     * Create a BanyanDB client instance with a customized options.
+     *
+     * @param targets server targets
+     * @param options customized options
+     */
+    public BanyanDBClient(String[] targets, Options options) {
+        String[] tt = Preconditions.checkNotNull(targets, "targets");
+        checkState(tt.length > 0, "targets' size must be more than 1");
+        tt = Arrays.stream(tt).filter(t -> !Strings.isNullOrEmpty(t)).toArray(size -> new String[size]);
+        checkState(tt.length > 0, "valid targets' size must be more than 1");
+        this.targets = tt;
+        this.options = options;
+        this.connectionEstablishLock = new ReentrantLock();
+    }
+
+    /**
+     * Construct a connection to the server.
+     *
+     * @throws IOException thrown if fail to create a connection
+     */
+    public void connect() throws IOException {
+        connectionEstablishLock.lock();
+        try {
+            if (!isConnected) {
+                URI[] addresses = new URI[this.targets.length];
+                for (int i = 0; i < this.targets.length; i++) {
+                        addresses[i] = URI.create("//" + this.targets[i]);
+                }
+                ChannelManager rawChannel = ChannelManager.create(this.options.buildChannelManagerSettings(),
+                                                                  new DefaultChannelFactory(addresses, this.options));
+                this.channelManager = rawChannel;
+                // Seeded here rather than in the constructor, so that mutating the supplied Options
+                // between construction and connect() still takes effect, as it does for every other option.
+                // A rotation that arrived first is not lost: updateCredentials writes Options too.
+                authInterceptor.updateCredentials(options.getUsername(), options.getPassword());
+                // The auth interceptor is always installed: it sends no credentials until both a
+                // username and a password are set, so they can be rotated in without a reconnect.
+                Channel interceptedChannel = ClientInterceptors.intercept(rawChannel, authInterceptor);
+                // Ensure this.channel is assigned only once.
+                this.channel = interceptedChannel;
+                streamServiceBlockingStub = StreamServiceGrpc.newBlockingStub(this.channel);
+                measureServiceBlockingStub = MeasureServiceGrpc.newBlockingStub(this.channel);
+                traceServiceBlockingStub = TraceServiceGrpc.newBlockingStub(this.channel);
+                streamServiceStub = StreamServiceGrpc.newStub(this.channel);
+                measureServiceStub = MeasureServiceGrpc.newStub(this.channel);
+                traceServiceStub = TraceServiceGrpc.newStub(this.channel);
+                bydbQLServiceBlockingStub = BydbQLServiceGrpc.newBlockingStub(this.channel);
+                isConnected = true;
+            }
+        } finally {
+            connectionEstablishLock.unlock();
+        }
+    }
+
+    /**
+     * Replace the basic-auth credentials used by subsequent RPCs. The credentials are read per call, so
+     * the change applies without reconnecting and without interrupting in-flight requests.
+     *
+     * @param username the new username; when either half is blank no credentials are sent at all
+     * @param password the new password; when either half is blank no credentials are sent at all
+     */
+    public void updateCredentials(String username, String password) {
+        // Options is written too, so a rotation that lands before connect() is not overwritten when
+        // connect() seeds the interceptor from it.
+        options.setUsername(username);
+        options.setPassword(password);
+        authInterceptor.updateCredentials(username, password);
+    }
+
+    /**
+     * Rebuild the gRPC channel so that the TLS trust CA at {@code sslTrustCAPath} is read from disk again.
+     * Credentials do not need this — {@link AuthInterceptor} reads them per call — but the trust material is
+     * resolved when the channel is built, so a rotated CA is only picked up by a new channel.
+     *
+     * <p>Requests already running finish on the old channel. The replacement re-picks a target from the configured
+     * list, so the client may end up connected to a different server afterwards.
+     *
+     * @throws IOException if the replacement channel cannot be created; the current one keeps serving.
+     */
+    public void rebuildChannel() throws IOException {
+        final ChannelManager manager = this.channelManager;
+        if (manager == null) {
+            // Not connected yet; connect() will read the current CA when it builds the channel.
+            return;
+        }
+        manager.rebuild();
+    }
+
+    @VisibleForTesting
+    void connect(Channel channel) {
+        connectionEstablishLock.lock();
+        try {
+            if (!isConnected) {
+                this.channel = channel;
+                streamServiceBlockingStub = StreamServiceGrpc.newBlockingStub(this.channel);
+                measureServiceBlockingStub = MeasureServiceGrpc.newBlockingStub(this.channel);
+                traceServiceBlockingStub = TraceServiceGrpc.newBlockingStub(this.channel);
+                streamServiceStub = StreamServiceGrpc.newStub(this.channel);
+                measureServiceStub = MeasureServiceGrpc.newStub(this.channel);
+                traceServiceStub = TraceServiceGrpc.newStub(this.channel);
+                bydbQLServiceBlockingStub = BydbQLServiceGrpc.newBlockingStub(this.channel);
+                isConnected = true;
+            }
+        } finally {
+            connectionEstablishLock.unlock();
+        }
+    }
+
+    /**
+     * Build a MeasureWrite request.
+     *
+     * @param group     the group of the measure
+     * @param name      the name of the measure
+     * @param timestamp the timestamp of the measure
+     * @return the request to be built
+     */
+    public MeasureWrite createMeasureWrite(String group, String name, long timestamp) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        return new MeasureWrite(BanyandbCommon.Metadata.newBuilder().setGroup(group).setName(name).build(), timestamp);
+    }
+
+    /**
+     * Build a StreamWrite request.
+     *
+     * @param group     the group of the stream
+     * @param name      the name of the stream
+     * @param elementId the primary key of the stream
+     * @return the request to be built
+     */
+    public StreamWrite createStreamWrite(String group, String name, final String elementId) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        return new StreamWrite(BanyandbCommon.Metadata.newBuilder().setGroup(group).setName(name).build(), elementId);
+    }
+
+    /**
+     * Build a TraceWrite request without initial timestamp.
+     *
+     * @param group the group of the trace
+     * @param name  the name of the trace
+     * @return the request to be built
+     */
+    public TraceWrite createTraceWrite(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        return new TraceWrite(BanyandbCommon.Metadata.newBuilder().setGroup(group).setName(name).build());
+    }
+
+    /**
+     * Query streams according to given conditions
+     *
+     * @param streamQuery condition for query
+     * @return hint streams.
+     */
+    public StreamQueryResponse query(StreamQuery streamQuery) throws BanyanDBException {
+        checkState(this.streamServiceStub != null, "stream service is null");
+
+        for (String group : streamQuery.groups) {
+            final BanyandbStream.QueryResponse response =
+                HandleExceptionsWith.callAndTranslateApiException(() ->
+                                                                      this.streamServiceBlockingStub
+                                                                          .withDeadlineAfter(
+                                                                              this.getOptions().getDeadline(),
+                                                                              TimeUnit.SECONDS
+                                                                          )
+                                                                          .query(streamQuery.build()));
+            return new StreamQueryResponse(response);
+        }
+        throw new RuntimeException("No metadata found for the query");
+    }
+
+    /**
+     * Query TopN according to given conditions
+     *
+     * @param topNQuery condition for query
+     * @return hint topN.
+     */
+    public TopNQueryResponse query(TopNQuery topNQuery) throws BanyanDBException {
+        checkState(this.measureServiceStub != null, "measure service is null");
+
+        final BanyandbMeasure.TopNResponse response = HandleExceptionsWith.callAndTranslateApiException(() ->
+                this.measureServiceBlockingStub
+                        .withDeadlineAfter(this.getOptions().getDeadline(), TimeUnit.SECONDS)
+                        .topN(topNQuery.build()));
+        return new TopNQueryResponse(response);
+    }
+
+    /**
+     * Query measures according to given conditions
+     *
+     * @param measureQuery condition for query
+     * @return hint measures.
+     */
+    public MeasureQueryResponse query(MeasureQuery measureQuery) throws BanyanDBException {
+        checkState(this.streamServiceStub != null, "measure service is null");
+        for (String group : measureQuery.groups) {
+            final BanyandbMeasure.QueryResponse response =
+                HandleExceptionsWith.callAndTranslateApiException(() ->
+                                                                      this.measureServiceBlockingStub
+                                                                          .withDeadlineAfter(
+                                                                              this.getOptions()
+                                                                                  .getDeadline(),
+                                                                              TimeUnit.SECONDS
+                                                                          )
+                                                                          .query(
+                                                                              measureQuery.build()));
+            return new MeasureQueryResponse(response);
+        }
+            throw new RuntimeException("No metadata found for the query");
+   }
+
+    /**
+     * Query traces according to given conditions
+     *
+     * @param traceQuery condition for query
+     * @return trace query response.
+     */
+    public TraceQueryResponse query(TraceQuery traceQuery) throws BanyanDBException {
+        checkState(this.traceServiceStub != null, "trace service is null");
+
+        for (String group : traceQuery.groups) {
+            final BanyandbTrace.QueryResponse response =
+                HandleExceptionsWith.callAndTranslateApiException(() ->
+                                                                      this.traceServiceBlockingStub
+                                                                          .withDeadlineAfter(
+                                                                              this.getOptions().getDeadline(),
+                                                                              TimeUnit.SECONDS
+                                                                          )
+                                                                          .query(traceQuery.build()));
+            return new TraceQueryResponse(response);
+
+        }
+        throw new RuntimeException("No metadata found for the query");
+    }
+
+    @SafeVarargs
+    private BanyandbBydbql.QueryResponse queryBydbQL(
+        int maxInboundMessageSize, String bydbql, Serializable<BanyandbModel.TagValue>... params)
+        throws BanyanDBException {
+        checkState(this.bydbQLServiceBlockingStub != null, "bydbql service is null");
+        final List<BanyandbModel.TagValue> tagValues = new ArrayList<>(params.length);
+        for (final Serializable<BanyandbModel.TagValue> param : params) {
+            tagValues.add(param.serialize());
+        }
+        final BanyandbBydbql.QueryRequest request = BanyandbBydbql.QueryRequest.newBuilder()
+                .setQuery(bydbql)
+                .addAllParams(tagValues)
+                .build();
+        BydbQLServiceGrpc.BydbQLServiceBlockingStub stub =
+            this.bydbQLServiceBlockingStub.withDeadlineAfter(this.getOptions().getDeadline(), TimeUnit.SECONDS);
+        if (maxInboundMessageSize > 0) {
+            stub = stub.withMaxInboundMessageSize(maxInboundMessageSize);
+        }
+        final BydbQLServiceGrpc.BydbQLServiceBlockingStub bound = stub;
+        return HandleExceptionsWith.callAndTranslateApiException(() -> bound.query(request));
+    }
+
+    /**
+     * Query measures with a BydbQL statement.
+     *
+     * @param bydbql a BydbQL query whose FROM clause targets a MEASURE
+     * @param params values bound to the {@code ?} placeholders, in order of appearance
+     * @return the measure query response
+     * @throws BanyanDBException if the query fails or the server returns a non-measure result
+     */
+    @SafeVarargs
+    public final MeasureQueryResponse queryMeasure(
+            String bydbql, Serializable<BanyandbModel.TagValue>... params) throws BanyanDBException {
+        final BanyandbBydbql.QueryResponse resp = queryBydbQL(0, bydbql, params);
+        if (resp.getResultCase() != BanyandbBydbql.QueryResponse.ResultCase.MEASURE_RESULT) {
+            throw new IllegalStateException("expected measure_result but got " + resp.getResultCase());
+        }
+        return new MeasureQueryResponse(resp.getMeasureResult());
+    }
+
+    /**
+     * Query a stream with a BydbQL statement.
+     *
+     * @param bydbql a BydbQL query whose FROM clause targets a STREAM
+     * @param params values bound to the {@code ?} placeholders, in order of appearance
+     * @return the stream query response
+     * @throws BanyanDBException if the query fails or the server returns a non-stream result
+     */
+    @SafeVarargs
+    public final StreamQueryResponse queryStream(
+            String bydbql, Serializable<BanyandbModel.TagValue>... params) throws BanyanDBException {
+        return queryStream(0, bydbql, params);
+    }
+
+    /**
+     * Query a stream with a BydbQL statement, with a cap on the response of this call alone. The cap is a call
+     * option on the shared channel, not a channel option: the next call sees the channel's default again.
+     *
+     * @param maxInboundMessageSize the most bytes the response may carry, in place of the channel's default,
+     *                              {@link Options#getMaxInboundMessageSize()}; 0 keeps the default
+     * @param bydbql                a BydbQL query whose FROM clause targets a STREAM
+     * @param params                values bound to the {@code ?} placeholders, in order of appearance
+     * @return the stream query response
+     * @throws BanyanDBException if the query fails or the server returns a non-stream result
+     */
+    @SafeVarargs
+    public final StreamQueryResponse queryStream(
+            int maxInboundMessageSize, String bydbql, Serializable<BanyandbModel.TagValue>... params)
+        throws BanyanDBException {
+        final BanyandbBydbql.QueryResponse resp = queryBydbQL(maxInboundMessageSize, bydbql, params);
+        if (resp.getResultCase() != BanyandbBydbql.QueryResponse.ResultCase.STREAM_RESULT) {
+            throw new IllegalStateException("expected stream_result but got " + resp.getResultCase());
+        }
+        return new StreamQueryResponse(resp.getStreamResult());
+    }
+
+    /**
+     * Query traces with a BydbQL statement.
+     *
+     * @param bydbql a BydbQL query whose FROM clause targets a TRACE
+     * @param params values bound to the {@code ?} placeholders, in order of appearance
+     * @return the trace query response
+     * @throws BanyanDBException if the query fails or the server returns a non-trace result
+     */
+    @SafeVarargs
+    public final TraceQueryResponse queryTrace(
+            String bydbql, Serializable<BanyandbModel.TagValue>... params) throws BanyanDBException {
+        final BanyandbBydbql.QueryResponse resp = queryBydbQL(0, bydbql, params);
+        if (resp.getResultCase() != BanyandbBydbql.QueryResponse.ResultCase.TRACE_RESULT) {
+            throw new IllegalStateException("expected trace_result but got " + resp.getResultCase());
+        }
+        return new TraceQueryResponse(resp.getTraceResult());
+    }
+
+    /**
+     * Query TopN with a BydbQL {@code SHOW TOP} statement.
+     *
+     * @param bydbql a BydbQL {@code SHOW TOP} query over a MEASURE
+     * @param params values bound to the {@code ?} placeholders, in order of appearance
+     * @return the TopN query response
+     * @throws BanyanDBException if the query fails or the server returns a non-topn result
+     */
+    @SafeVarargs
+    public final TopNQueryResponse queryTopN(
+            String bydbql, Serializable<BanyandbModel.TagValue>... params) throws BanyanDBException {
+        final BanyandbBydbql.QueryResponse resp = queryBydbQL(0, bydbql, params);
+        if (resp.getResultCase() != BanyandbBydbql.QueryResponse.ResultCase.TOPN_RESULT) {
+            throw new IllegalStateException("expected topn_result but got " + resp.getResultCase());
+        }
+        return new TopNQueryResponse(resp.getTopnResult());
+    }
+
+    /**
+     * Query properties with a BydbQL statement. Properties have no dedicated response wrapper,
+     * so the raw protobuf response is returned, matching {@link #query(BanyandbProperty.QueryRequest)}.
+     *
+     * @param bydbql a BydbQL query whose FROM clause targets a PROPERTY
+     * @param params values bound to the {@code ?} placeholders, in order of appearance
+     * @return the raw property query response
+     * @throws BanyanDBException if the query fails or the server returns a non-property result
+     */
+    @SafeVarargs
+    public final BanyandbProperty.QueryResponse queryProperty(
+            String bydbql, Serializable<BanyandbModel.TagValue>... params) throws BanyanDBException {
+        final BanyandbBydbql.QueryResponse resp = queryBydbQL(0, bydbql, params);
+        if (resp.getResultCase() != BanyandbBydbql.QueryResponse.ResultCase.PROPERTY_RESULT) {
+            throw new IllegalStateException("expected property_result but got " + resp.getResultCase());
+        }
+        return resp.getPropertyResult();
+    }
+
+    /**
+     * Define a new group and attach to the current client.
+     *
+     * @param group the group to be created
+     * @return a grouped client
+     */
+    public Group define(Group group) throws BanyanDBException {
+        GroupMetadataRegistry registry = new GroupMetadataRegistry(checkNotNull(this.channel));
+        registry.create(group);
+        return registry.get(null, group.getMetadata().getName());
+    }
+
+    /**
+     * Define a new stream and return the etcd {@code mod_revision} server-stamped on
+     * the registry write. Callers that need a schema-watch fence (see
+     * {@link SchemaWatcher#awaitRevisionApplied}) capture this value; legacy callers
+     * that don't need the fence may ignore the return.
+     */
+    public long define(Stream stream) throws BanyanDBException {
+        StreamMetadataRegistry streamRegistry = new StreamMetadataRegistry(checkNotNull(this.channel));
+        return streamRegistry.create(stream);
+    }
+
+    /**
+     * Define a new stream with index rules. Returns the highest {@code mod_revision}
+     * across the stream + every index rule + the binding write so callers can fence
+     * on a single revision.
+     */
+    public long define(Stream stream, List<IndexRule> indexRules) throws BanyanDBException {
+        long maxRev = define(stream);
+        return Math.max(maxRev, defineIndexRules(stream, indexRules));
+    }
+
+    /**
+     * Define a new measure. See {@link #define(Stream)} for the mod_revision contract.
+     */
+    public long define(Measure measure) throws BanyanDBException {
+        MeasureMetadataRegistry measureRegistry = new MeasureMetadataRegistry(checkNotNull(this.channel));
+        return measureRegistry.create(measure);
+    }
+
+    /**
+     * Define a new measure with index rules. Returns the highest mod_revision of
+     * any registry write performed during the call.
+     */
+    public long define(Measure measure, List<IndexRule> indexRules) throws BanyanDBException {
+        long maxRev = define(measure);
+        return Math.max(maxRev, defineIndexRules(measure, indexRules));
+    }
+
+    /**
+     * Define a new TopNAggregation. Returns the etcd mod_revision of the write.
+     */
+    public long define(TopNAggregation topNAggregation) throws BanyanDBException {
+        TopNAggregationMetadataRegistry registry = new TopNAggregationMetadataRegistry(checkNotNull(this.channel));
+        return registry.create(topNAggregation);
+    }
+
+    /**
+     * Define a new IndexRule. Returns the etcd mod_revision of the write.
+     */
+    public long define(IndexRule indexRule) throws BanyanDBException {
+        IndexRuleMetadataRegistry registry = new IndexRuleMetadataRegistry(checkNotNull(this.channel));
+        return registry.create(indexRule);
+    }
+
+    /**
+     * Define a new IndexRuleBinding, if the beginAt and expireAt are not set, the default value will be used.
+     * The default value of beginAt is the current time, and the default value of expireAt is 2099-01-01 00:00:00 UTC.
+     * @param indexRuleBinding the index rule binding to be created
+     */
+    public long define(IndexRuleBinding indexRuleBinding) throws BanyanDBException {
+        ZonedDateTime beginAt = indexRuleBinding.getBeginAt() == Timestamp.getDefaultInstance() ? ZonedDateTime.now() : TimeUtils.parseTimestamp(indexRuleBinding.getBeginAt());
+        ZonedDateTime expireAt = indexRuleBinding.getExpireAt() == Timestamp.getDefaultInstance() ? DEFAULT_EXPIRE_AT : TimeUtils.parseTimestamp(indexRuleBinding.getExpireAt());
+        return this.define(indexRuleBinding, beginAt, expireAt);
+    }
+
+    /**
+     * Define a new IndexRuleBinding. Returns the etcd mod_revision of the write.
+     */
+    public long define(IndexRuleBinding indexRuleBinding, ZonedDateTime beginAt, ZonedDateTime expireAt) throws BanyanDBException {
+        IndexRuleBindingMetadataRegistry registry = new IndexRuleBindingMetadataRegistry(checkNotNull(this.channel));
+        indexRuleBinding = indexRuleBinding.toBuilder()
+                                           .setBeginAt(TimeUtils.buildTimestamp(beginAt))
+                                           .setExpireAt(TimeUtils.buildTimestamp(expireAt))
+                                           .build();
+        return registry.create(indexRuleBinding);
+    }
+
+    /**
+     * Bind index rule to the stream. Returns the highest mod_revision of any registry
+     * write performed during the call. Per-rule {@code ALREADY_EXISTS} responses are
+     * swallowed (idempotent); a swallowed conflict contributes 0 to the max.
+     */
+    public long defineIndexRules(Stream stream, List<IndexRule> indexRules) throws BanyanDBException {
+        Preconditions.checkArgument(stream != null, "stream cannot be null");
+
+        IndexRuleMetadataRegistry irRegistry = new IndexRuleMetadataRegistry(checkNotNull(this.channel));
+        long maxRev = MetadataClient.DEFAULT_MOD_REVISION;
+        for (final IndexRule ir : indexRules) {
+            try {
+                maxRev = Math.max(maxRev, irRegistry.create(ir));
+            } catch (BanyanDBException ex) {
+                if (ex.getStatus().equals(Status.Code.ALREADY_EXISTS)) {
+                    continue;
+                }
+                throw ex;
+            }
+        }
+        if (indexRules.isEmpty()) {
+            return maxRev;
+        }
+
+        List<String> indexRuleNames = indexRules.stream()
+                                                .map(indexRule -> indexRule.getMetadata().getName())
+                                                .collect(Collectors.toList());
+
+        IndexRuleBinding binding = IndexRuleBinding.newBuilder()
+                                                   .setMetadata(Metadata.newBuilder()
+                                                                        .setGroup(
+                                                                            stream.getMetadata().getGroup())
+                                                                        .setName(
+                                                                            stream.getMetadata().getName()))
+                                                   .setSubject(Subject.newBuilder()
+                                                                      .setName(stream.getMetadata()
+                                                                                     .getName())
+                                                                      .setCatalog(
+                                                                          BanyandbCommon.Catalog.CATALOG_STREAM))
+                                                   .addAllRules(indexRuleNames).build();
+        return Math.max(maxRev, this.define(binding));
+    }
+
+    /**
+     * Bind index rule to the measure. See {@link #defineIndexRules(Stream, List)} for
+     * the mod_revision contract.
+     */
+    public long defineIndexRules(Measure measure, List<IndexRule> indexRules) throws BanyanDBException {
+        Preconditions.checkArgument(measure != null, "measure cannot be null");
+
+        IndexRuleMetadataRegistry irRegistry = new IndexRuleMetadataRegistry(checkNotNull(this.channel));
+        long maxRev = MetadataClient.DEFAULT_MOD_REVISION;
+        for (final IndexRule ir : indexRules) {
+            try {
+                maxRev = Math.max(maxRev, irRegistry.create(ir));
+            } catch (BanyanDBException ex) {
+                // multiple entity can share a single index rule
+                if (ex.getStatus().equals(Status.Code.ALREADY_EXISTS)) {
+                    continue;
+                }
+                throw ex;
+            }
+        }
+        if (indexRules.isEmpty()) {
+            return maxRev;
+        }
+
+        List<String> indexRuleNames = indexRules.stream().map(indexRule -> indexRule.getMetadata().getName()).collect(Collectors.toList());
+
+        IndexRuleBinding binding = IndexRuleBinding.newBuilder()
+                                                   .setMetadata(Metadata.newBuilder()
+                                                                        .setGroup(
+                                                                            measure.getMetadata().getGroup())
+                                                                        .setName(
+                                                                            measure.getMetadata().getName()))
+                                                   .setSubject(Subject.newBuilder()
+                                                                      .setName(measure.getMetadata()
+                                                                                      .getName())
+                                                                      .setCatalog(
+                                                                          BanyandbCommon.Catalog.CATALOG_MEASURE))
+                                                   .addAllRules(indexRuleNames).build();
+        return Math.max(maxRev, this.define(binding));
+    }
+
+    /** Update the group. Returns the etcd mod_revision of the write. */
+    public long update(Group group) throws BanyanDBException {
+        GroupMetadataRegistry registry = new GroupMetadataRegistry(checkNotNull(this.channel));
+        return registry.updateWithRevision(group);
+    }
+
+    /** Update the stream. Returns the etcd mod_revision of the write. */
+    public long update(Stream stream) throws BanyanDBException {
+        StreamMetadataRegistry streamRegistry = new StreamMetadataRegistry(checkNotNull(this.channel));
+        return streamRegistry.updateWithRevision(stream);
+    }
+
+    /** Update the measure. Returns the etcd mod_revision of the write. */
+    public long update(Measure measure) throws BanyanDBException {
+        MeasureMetadataRegistry measureRegistry = new MeasureMetadataRegistry(checkNotNull(this.channel));
+        return measureRegistry.updateWithRevision(measure);
+    }
+
+    /** Update the TopNAggregation. Returns the etcd mod_revision of the write. */
+    public long update(TopNAggregation topNAggregation) throws BanyanDBException {
+        TopNAggregationMetadataRegistry registry = new TopNAggregationMetadataRegistry(checkNotNull(this.channel));
+        return registry.updateWithRevision(topNAggregation);
+    }
+
+    /** Update the IndexRule. Returns the etcd mod_revision of the write. */
+    public long update(IndexRule indexRule) throws BanyanDBException {
+        IndexRuleMetadataRegistry registry = new IndexRuleMetadataRegistry(checkNotNull(this.channel));
+        return registry.updateWithRevision(indexRule);
+    }
+
+    /** Update the IndexRuleBinding. Returns the etcd mod_revision of the write. */
+    public long update(IndexRuleBinding indexRuleBinding) throws BanyanDBException {
+        IndexRuleBindingMetadataRegistry registry = new IndexRuleBindingMetadataRegistry(checkNotNull(this.channel));
+        return registry.updateWithRevision(indexRuleBinding);
+    }
+
+    /**
+     * Delete the group
+     * @param name name of the group
+     * @return true if the group is deleted successfully
+     */
+    public boolean deleteGroup(String name) throws BanyanDBException {
+        GroupMetadataRegistry registry = new GroupMetadataRegistry(checkNotNull(this.channel));
+        return registry.delete(name, name);
+    }
+
+    /**
+     * Delete a stream
+     * @param group the group name of the stream
+     * @param name  the name of the stream
+     * @return true if the stream is deleted successfully
+     */
+    public boolean deleteStream(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        StreamMetadataRegistry streamRegistry = new StreamMetadataRegistry(checkNotNull(this.channel));
+        return streamRegistry.delete(group, name);
+    }
+
+    /**
+     * Delete a measure
+     * @param group the group name of the measure
+     * @param name  the name of the measure
+     * @return true if the measure is deleted successfully
+     */
+    public boolean deleteMeasure(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        MeasureMetadataRegistry measureRegistry = new MeasureMetadataRegistry(checkNotNull(this.channel));
+        return measureRegistry.delete(group, name);
+    }
+
+    /**
+     * Delete the TopNAggregation
+     * @param group the group name of the topN rule
+     * @param name the name of the topN rule
+     * @return true if the topN rule is deleted successfully
+     */
+    public boolean deleteTopNAggregation(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        TopNAggregationMetadataRegistry registry = new TopNAggregationMetadataRegistry(checkNotNull(this.channel));
+        return registry.delete(group, name);
+    }
+
+    /**
+     * Delete the IndexRule
+     * @param group the group name of the index rule
+     * @param name the name of the index rule
+     * @return true if the index rule is deleted successfully
+     */
+    public boolean deleteIndexRule(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        IndexRuleMetadataRegistry registry = new IndexRuleMetadataRegistry(checkNotNull(this.channel));
+        return registry.delete(group, name);
+    }
+
+    /**
+     * Delete the IndexRuleBinding
+     * @param group the group name of the index rule binding
+     * @param name the name of the index rule binding
+     * @return true if the index rule binding is deleted successfully
+     */
+    public boolean deleteIndexRuleBinding(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        IndexRuleBindingMetadataRegistry registry = new IndexRuleBindingMetadataRegistry(checkNotNull(this.channel));
+        return registry.delete(group, name);
+    }
+
+    /**
+     * Variant of {@link #deleteStream(String, String)} that returns the etcd
+     * {@code mod_revision} of the tombstone. Returns 0 when the server did not
+     * record one — callers needing a delete-fence then fall back to
+     * {@link SchemaWatcher#awaitSchemaDeleted}.
+     */
+    public long deleteStreamWithRevision(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        return new StreamMetadataRegistry(checkNotNull(this.channel)).deleteWithRevision(group, name);
+    }
+
+    /** See {@link #deleteStreamWithRevision}. */
+    public long deleteMeasureWithRevision(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        return new MeasureMetadataRegistry(checkNotNull(this.channel)).deleteWithRevision(group, name);
+    }
+
+    /** See {@link #deleteStreamWithRevision}. */
+    public long deleteTopNAggregationWithRevision(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        return new TopNAggregationMetadataRegistry(checkNotNull(this.channel)).deleteWithRevision(group, name);
+    }
+
+    /** See {@link #deleteStreamWithRevision}. */
+    public long deleteIndexRuleWithRevision(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        return new IndexRuleMetadataRegistry(checkNotNull(this.channel)).deleteWithRevision(group, name);
+    }
+
+    /** See {@link #deleteStreamWithRevision}. */
+    public long deleteIndexRuleBindingWithRevision(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        return new IndexRuleBindingMetadataRegistry(checkNotNull(this.channel)).deleteWithRevision(group, name);
+    }
+
+    /**
+     * Lazy accessor for the schema-watcher wrapper. Use to fence subsequent
+     * data writes / queries against a target {@code mod_revision}, or to wait for
+     * a delete tombstone to fan out across data nodes.
+     */
+    public SchemaWatcher getSchemaWatcher() {
+        SchemaWatcher local = this.schemaWatcher;
+        if (local == null) {
+            synchronized (this) {
+                local = this.schemaWatcher;
+                if (local == null) {
+                    local = new SchemaWatcher(checkNotNull(this.channel));
+                    this.schemaWatcher = local;
+                }
+            }
+        }
+        return local;
+    }
+
+    /**
+     * Find the IndexRule
+     * @param group the group name of the index rule
+     * @param name the name of the index rule
+     * @return the index rule if it can be found, otherwise null
+     */
+    public IndexRule findIndexRule(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        IndexRuleMetadataRegistry registry = new IndexRuleMetadataRegistry(checkNotNull(this.channel));
+        try {
+            return registry.get(group, name);
+        } catch (BanyanDBException ex) {
+            if (ex.getStatus().equals(Status.Code.NOT_FOUND)) {
+                return null;
+            }
+            throw ex;
+        }
+    }
+
+    /**
+     * Find all IndexRules in the group
+     * @param group the group name of the index rule
+     * @return all index rules in the group
+     */
+    public List<IndexRule> findIndexRules(String group) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        IndexRuleMetadataRegistry registry = new IndexRuleMetadataRegistry(checkNotNull(this.channel));
+        return registry.list(group);
+    }
+
+    /**
+     * Find the IndexRuleBinding
+     * @param group the group name of the index rule binding
+     * @param name the name of the index rule binding
+     * @return the index rule binding if it can be found, otherwise null
+     */
+    public IndexRuleBinding findIndexRuleBinding(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        IndexRuleBindingMetadataRegistry registry = new IndexRuleBindingMetadataRegistry(checkNotNull(this.channel));
+        try {
+            return registry.get(group, name);
+        } catch (BanyanDBException ex) {
+            if (ex.getStatus().equals(Status.Code.NOT_FOUND)) {
+                return null;
+            }
+            throw ex;
+        }
+    }
+
+    /**
+     * Find all IndexRuleBindings in the group
+     * @param group the group name of the index rule binding
+     * @return all index rule bindings in the group
+     */
+    public List<IndexRuleBinding> findIndexRuleBindings(String group) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        IndexRuleBindingMetadataRegistry registry = new IndexRuleBindingMetadataRegistry(checkNotNull(this.channel));
+        return registry.list(group);
+    }
+
+    /**
+     * Define a new property.
+     *
+     * @param property the property to be stored in the BanyanBD
+     * @throws BanyanDBException if the property is invalid
+     */
+    public long define(Property property) throws BanyanDBException {
+        PropertyMetadataRegistry registry = new PropertyMetadataRegistry(checkNotNull(this.channel));
+        return registry.create(property);
+    }
+
+    /**
+     * Update the property. Returns the etcd mod_revision of the write.
+     */
+    public long update(Property property) throws BanyanDBException {
+        PropertyMetadataRegistry registry = new PropertyMetadataRegistry(checkNotNull(this.channel));
+        return registry.updateWithRevision(property);
+    }
+
+    /**
+     * Find the property with given group and name
+     *
+     * @param group group of the metadata
+     * @param name  name of the metadata
+     * @return the property found in BanyanDB. Otherwise, null is returned.
+     */
+    public Property findPropertyDefinition(String group, String name) throws BanyanDBException {
+        PropertyMetadataRegistry registry = new PropertyMetadataRegistry(checkNotNull(this.channel));
+        return registry.get(group, name);
+    }
+
+    /**
+     * Find the properties with given group
+     *
+     * @param group group of the metadata
+     * @return the properties found in BanyanDB
+     */
+    public List<Property> findPropertiesDefinition(String group) throws BanyanDBException {
+        PropertyMetadataRegistry registry = new PropertyMetadataRegistry(checkNotNull(this.channel));
+        return registry.list(group);
+    }
+
+    /**
+     * Delete the property
+     *
+     * @param group group of the metadata
+     * @param name  name of the metadata
+     * @return if this property has been deleted
+     */
+    public boolean deletePropertyDefinition(String group, String name) throws BanyanDBException {
+        PropertyMetadataRegistry registry = new PropertyMetadataRegistry(checkNotNull(this.channel));
+        return registry.delete(group, name);
+    }
+
+    /**
+     * Query properties
+     *
+     * @param request query request
+     * @return query response
+     */
+    public BanyandbProperty.QueryResponse query(BanyandbProperty.QueryRequest request) throws BanyanDBException {
+        PropertyStore store = new PropertyStore(checkNotNull(this.channel));
+        return store.query(request);
+    }
+
+    /**
+     * Define a new trace
+     *
+     * @param trace the trace to be stored in the BanyanDB
+     * @throws BanyanDBException if the trace is invalid
+     */
+    public long define(Trace trace) throws BanyanDBException {
+        TraceMetadataRegistry registry = new TraceMetadataRegistry(checkNotNull(this.channel));
+        return registry.create(trace);
+    }
+
+    /**
+     * Update the trace. Returns the etcd mod_revision of the write.
+     */
+    public long update(Trace trace) throws BanyanDBException {
+        TraceMetadataRegistry registry = new TraceMetadataRegistry(checkNotNull(this.channel));
+        return registry.updateWithRevision(trace);
+    }
+
+    /**
+     * Find the trace with given group and name
+     *
+     * @param group group of the metadata
+     * @param name  name of the metadata
+     * @return the trace found in BanyanDB. Otherwise, null is returned.
+     */
+    public Trace findTrace(String group, String name) throws BanyanDBException {
+        try {
+            return new TraceMetadataRegistry(checkNotNull(this.channel)).get(group, name);
+        } catch (BanyanDBException ex) {
+            if (ex.getStatus().equals(Status.Code.NOT_FOUND)) {
+                return null;
+            }
+            throw ex;
+        }
+    }
+
+    /**
+     * Find the traces with given group
+     *
+     * @param group group of the metadata
+     * @return the traces found in BanyanDB
+     */
+    public List<Trace> findTraces(String group) throws BanyanDBException {
+        TraceMetadataRegistry registry = new TraceMetadataRegistry(checkNotNull(this.channel));
+        return registry.list(group);
+    }
+
+    /**
+     * Delete the trace
+     *
+     * @param group group of the metadata
+     * @param name  name of the metadata
+     * @return if this trace has been deleted
+     */
+    public boolean deleteTrace(String group, String name) throws BanyanDBException {
+        TraceMetadataRegistry registry = new TraceMetadataRegistry(checkNotNull(this.channel));
+        return registry.delete(group, name);
+    }
+
+    /**
+     * Try to find the group defined
+     *
+     * @param name name of the group
+     * @return the group found in BanyanDB. Otherwise, null is returned.
+     */
+    public Group findGroup(String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+
+        try {
+            return new GroupMetadataRegistry(checkNotNull(this.channel)).get(name, name);
+        } catch (BanyanDBException ex) {
+            if (ex.getStatus().equals(Status.Code.NOT_FOUND)) {
+                return null;
+            }
+            throw ex;
+        }
+    }
+
+    /**
+     * Try to find the groups defined
+     *
+     * @return the groups found in BanyanDB
+     */
+    public List<Group> findGroups() throws BanyanDBException {
+        return new GroupMetadataRegistry(checkNotNull(this.channel)).list("");
+    }
+
+    /**
+     * Try to find the TopNAggregation from the BanyanDB with given group and name.
+     *
+     * @param group group of the TopNAggregation
+     * @param name  name of the TopNAggregation
+     * @return TopNAggregation if found. Otherwise, null is returned.
+     */
+    public TopNAggregation findTopNAggregation(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        try {
+            return new TopNAggregationMetadataRegistry(checkNotNull(this.channel)).get(group, name);
+        } catch (BanyanDBException ex) {
+            if (ex.getStatus().equals(Status.Code.NOT_FOUND)) {
+                return null;
+            }
+            throw ex;
+        }
+    }
+
+    /**
+     * Try to find the TopNAggregations from the BanyanDB with given group.
+     *
+     * @param group group of the TopNAggregations
+     * @return TopNAggregations if found.
+     */
+    public List<TopNAggregation> findTopNAggregations(String group) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        return new TopNAggregationMetadataRegistry(checkNotNull(this.channel)).list(group);
+    }
+
+    /**
+     * Try to find the stream from the BanyanDB with given group and name.
+     *
+     * @param group group of the stream
+     * @param name  name of the stream
+     * @return Steam if found. Otherwise, null is returned.
+     */
+    public Stream findStream(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        try {
+            return new StreamMetadataRegistry(checkNotNull(this.channel)).get(group, name);
+        } catch (BanyanDBException ex) {
+            if (ex.getStatus().equals(Status.Code.NOT_FOUND)) {
+                return null;
+            }
+            throw ex;
+        }
+    }
+
+    /**
+     * Try to find the streams from the BanyanDB with given group.
+     *
+     * @param group group of the streams
+     * @return Streams if found.
+     */
+    public List<Stream> findStreams(String group) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        StreamMetadataRegistry registry = new StreamMetadataRegistry(checkNotNull(this.channel));
+        return registry.list(group);
+    }
+
+    /**
+     * Try to find the measure from the BanyanDB with given group and name.
+     *
+     * @param group group of the measure
+     * @param name  name of the measure
+     * @return Measure with index rules if found. Otherwise, null is returned.
+     */
+    public Measure findMeasure(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+        try {
+            return new MeasureMetadataRegistry(checkNotNull(this.channel)).get(group, name);
+        } catch (BanyanDBException ex) {
+            if (ex.getStatus().equals(Status.Code.NOT_FOUND)) {
+                return null;
+            }
+            throw ex;
+        }
+    }
+
+    /**
+     * Try to find the measures from the BanyanDB with given group.
+     *
+     * @param group group of the measures
+     * @return Measures if found.
+     */
+    public List<Measure> findMeasures(String group) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        MeasureMetadataRegistry registry = new MeasureMetadataRegistry(checkNotNull(this.channel));
+        return registry.list(group);
+    }
+
+    private List<IndexRule> findIndexRulesByGroupAndBindingName(String group, String bindingName) throws
+            BanyanDBException {
+        IndexRuleBindingMetadataRegistry irbRegistry = new IndexRuleBindingMetadataRegistry(checkNotNull(this.channel));
+
+        IndexRuleBinding irb;
+        try {
+            irb = irbRegistry.get(group, bindingName);
+        } catch (BanyanDBException ex) {
+            if (ex.getStatus().equals(Status.Code.NOT_FOUND)) {
+                return Collections.emptyList();
+            }
+            throw ex;
+        }
+
+        if (irb == null) {
+            return Collections.emptyList();
+        }
+
+        List<IndexRule> indexRules = new ArrayList<>(irb.getRulesList().size());
+        return indexRules;
+    }
+
+    /**
+     * Check if the given stream exists.
+     *
+     * @param group group of the stream
+     * @param name  name of the stream
+     * @return ResourceExist which indicates whether group and stream exist
+     */
+    public ResourceExist existStream(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+
+        return new StreamMetadataRegistry(checkNotNull(this.channel)).exist(group, name);
+    }
+
+    /**
+     * Check if the given measure exists.
+     *
+     * @param group group of the measure
+     * @param name  name of the measure
+     * @return ResourceExist which indicates whether group and measure exist
+     */
+    public ResourceExist existMeasure(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+
+        return new MeasureMetadataRegistry(checkNotNull(this.channel)).exist(group, name);
+    }
+
+    /**
+     * Check if the given TopNAggregation exists.
+     *
+     * @param group group of the TopNAggregation
+     * @param name  name of the TopNAggregation
+     * @return ResourceExist which indicates whether group and TopNAggregation exist
+     */
+    public ResourceExist existTopNAggregation(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+
+        return new TopNAggregationMetadataRegistry(checkNotNull(this.channel)).exist(group, name);
+    }
+
+    /**
+     * Check if the given property exists.
+     *
+     * @param group group of the property
+     * @param name name of the property
+     * @return ResourceExist which indicates whether group and property exist
+     */
+    public ResourceExist existProperty(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+
+        return new PropertyMetadataRegistry(checkNotNull(this.channel)).exist(group, name);
+    }
+
+    /**
+     * Check whether the trace definition is existed in the server
+     *
+     * @param group group of the metadata
+     * @param name  name of the metadata
+     * @return ResourceExist which indicates whether group and trace exist
+     */
+    public ResourceExist existTrace(String group, String name) throws BanyanDBException {
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(group));
+        Preconditions.checkArgument(!Strings.isNullOrEmpty(name));
+
+        return new TraceMetadataRegistry(checkNotNull(this.channel)).exist(group, name);
+    }
+
+    /**
+     * Get the API version of the server
+     *
+     * @return the API version of the server
+     * @throws BanyanDBException if the server is not reachable
+     */
+    public BanyandbCommon.APIVersion getAPIVersion() throws BanyanDBException {
+        ServiceGrpc.ServiceBlockingStub stub = ServiceGrpc.newBlockingStub(this.channel);
+        return HandleExceptionsWith.callAndTranslateApiException(() -> {
+            BanyandbCommon.GetAPIVersionResponse resp = stub.getAPIVersion(BanyandbCommon.GetAPIVersionRequest.getDefaultInstance());
+            return resp.getVersion();
+        });
+    }
+
+    @Override
+    public void close() throws IOException {
+        connectionEstablishLock.lock();
+        try {
+            if (!isConnected) {
+                return;
+            }
+            // The channel the stubs were built on is an interceptor wrapper rather than a ManagedChannel,
+            // so shutting it down has to go through the manager that owns the transport and the refresh
+            // scheduler. The raw channel is only used by the test-only connect(Channel) entry point.
+            final ManagedChannel managedChannel;
+            if (channelManager != null) {
+                managedChannel = channelManager;
+            } else if (this.channel instanceof ManagedChannel) {
+                managedChannel = (ManagedChannel) this.channel;
+            } else {
+                managedChannel = null;
+            }
+            if (managedChannel == null) {
+                isConnected = false;
+                return;
+            }
+            try {
+                managedChannel.shutdown().awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException interruptedException) {
+                Thread.currentThread().interrupt();
+                log.warn("fail to wait for channel termination, shutdown now!", interruptedException);
+                managedChannel.shutdownNow();
+            }
+            isConnected = false;
+        } finally {
+            connectionEstablishLock.unlock();
+        }
+    }
+}

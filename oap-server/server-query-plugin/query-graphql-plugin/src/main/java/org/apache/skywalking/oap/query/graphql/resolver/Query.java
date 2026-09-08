@@ -18,11 +18,14 @@
 
 package org.apache.skywalking.oap.query.graphql.resolver;
 
-import com.coxautodev.graphql.tools.GraphQLQueryResolver;
+import com.google.errorprone.annotations.Keep;
+import graphql.kickstart.tools.GraphQLQueryResolver;
+import org.apache.skywalking.oap.server.core.version.Version;
 
 /**
  * Root Query Resolver.
  */
 public class Query implements GraphQLQueryResolver {
-    private String version = "8.0";
+    @Keep // GraphQL picks this as version
+    private final String version = Version.CURRENT.toString();
 }

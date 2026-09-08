@@ -18,21 +18,21 @@
 
 package org.apache.skywalking.oap.server.core.alarm;
 
-import lombok.AccessLevel;
+import java.util.Collections;
+import java.util.List;
 import lombok.Getter;
 import lombok.Setter;
 import org.apache.skywalking.oap.server.core.Const;
 import org.apache.skywalking.oap.server.core.source.DefaultScopeDefine;
 
-@Getter(AccessLevel.PUBLIC)
-@Setter(AccessLevel.PUBLIC)
+@Getter
+@Setter
 public class EndpointMetaInAlarm extends MetaInAlarm {
     private String metricsName;
 
     private String id;
     private String name;
-    private String[] tags;
-    private String[] properties;
+    private List<String> layers = Collections.emptyList();
 
     @Override
     public String getScope() {

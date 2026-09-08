@@ -13,40 +13,24 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
  */
 
 package org.apache.skywalking.oap.server.configuration.etcd;
 
-import com.google.common.base.Strings;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.skywalking.oap.server.configuration.api.AbstractConfigurationProvider;
 import org.apache.skywalking.oap.server.configuration.api.ConfigWatcherRegister;
-import org.apache.skywalking.oap.server.library.module.ModuleConfig;
 import org.apache.skywalking.oap.server.library.module.ModuleStartException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.skywalking.oap.server.library.util.StringUtil;
 
-/**
- * Get Configuration from etcd.
- */
+@Slf4j
 public class EtcdConfigurationProvider extends AbstractConfigurationProvider {
-
-    private final static Logger logger = LoggerFactory.getLogger(EtcdConfigurationProvider.class);
-
     private EtcdServerSettings settings;
-
-    public EtcdConfigurationProvider() {
-        settings = new EtcdServerSettings();
-    }
 
     @Override
     protected ConfigWatcherRegister initConfigReader() throws ModuleStartException {
-        logger.info("settings: {}", settings);
-        if (Strings.isNullOrEmpty(settings.getServerAddr())) {
-            throw new ModuleStartException("Etcd serverAddr cannot be null or empty.");
-        }
-        if (Strings.isNullOrEmpty(settings.getGroup())) {
-            throw new ModuleStartException("Etcd group cannot be null or empty.");
+        if (StringUtil.isEmpty(settings.getEndpoints())) {
+            throw new ModuleStartException("Etcd endpoints cannot be null or empty.");
         }
 
         try {
@@ -62,7 +46,17 @@ public class EtcdConfigurationProvider extends AbstractConfigurationProvider {
     }
 
     @Override
-    public ModuleConfig createConfigBeanIfAbsent() {
-        return settings;
+    public ConfigCreator newConfigCreator() {
+        return new ConfigCreator<EtcdServerSettings>() {
+            @Override
+            public Class type() {
+                return EtcdServerSettings.class;
+            }
+
+            @Override
+            public void onInitialized(final EtcdServerSettings initialized) {
+                settings = initialized;
+            }
+        };
     }
 }

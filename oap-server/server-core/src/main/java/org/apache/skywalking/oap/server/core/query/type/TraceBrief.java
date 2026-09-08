@@ -18,18 +18,25 @@
 
 package org.apache.skywalking.oap.server.core.query.type;
 
+import lombok.Getter;
+
 import java.util.ArrayList;
 import java.util.List;
-import lombok.Getter;
 import lombok.Setter;
+import org.apache.skywalking.oap.server.core.query.type.debugging.DebuggingTrace;
 
 @Getter
 public class TraceBrief {
     private final List<BasicTrace> traces;
+    //For OAP internal query debugging
     @Setter
-    private int total;
+    private DebuggingTrace debuggingTrace;
 
     public TraceBrief() {
         this.traces = new ArrayList<>();
+    }
+
+    public TraceBrief(List<BasicTrace> traces) {
+        this.traces = traces;
     }
 }

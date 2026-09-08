@@ -30,7 +30,7 @@ import org.apache.skywalking.oap.server.core.CoreModuleConfig;
 import org.apache.skywalking.oap.server.core.analysis.TimeBucket;
 import org.apache.skywalking.oap.server.core.query.type.ProfileTask;
 import org.apache.skywalking.oap.server.core.storage.StorageModule;
-import org.apache.skywalking.oap.server.core.storage.profile.IProfileTaskQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.trace.IProfileTaskQueryDAO;
 import org.apache.skywalking.oap.server.library.module.ModuleManager;
 import org.apache.skywalking.oap.server.library.module.Service;
 import org.slf4j.Logger;
@@ -118,16 +118,16 @@ public class ProfileTaskCache implements Service {
     }
 
     /**
-     * use for every db query
+     * use for every db query, -5 start time
      */
     public long getCacheStartTimeBucket() {
-        return TimeBucket.getRecordTimeBucket(System.currentTimeMillis());
+        return TimeBucket.getMinuteTimeBucket(System.currentTimeMillis() - TimeUnit.MINUTES.toMillis(5));
     }
 
     /**
-     * use for every db query, +10 start time and +15 end time(because use task end time to search)
+     * use for every db query, +5 end time(because use task start time to search)
      */
     public long getCacheEndTimeBucket() {
-        return TimeBucket.getRecordTimeBucket(System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(25));
+        return TimeBucket.getMinuteTimeBucket(System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(5));
     }
 }

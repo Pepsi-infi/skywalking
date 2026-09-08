@@ -19,6 +19,7 @@
 package org.apache.skywalking.oap.server.core.analysis.worker;
 
 import java.io.IOException;
+import java.util.Optional;
 import org.apache.skywalking.oap.server.core.analysis.record.Record;
 import org.apache.skywalking.oap.server.core.storage.IBatchDAO;
 import org.apache.skywalking.oap.server.core.storage.IRecordDAO;
@@ -32,26 +33,29 @@ import org.slf4j.LoggerFactory;
 
 public class RecordPersistentWorker extends AbstractWorker<Record> {
 
-    private static final Logger logger = LoggerFactory.getLogger(RecordPersistentWorker.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(RecordPersistentWorker.class);
 
     private final Model model;
     private final IRecordDAO recordDAO;
     private final IBatchDAO batchDAO;
+    private final Optional<AbstractWorker<Record>> nextExportWorker;
 
-    RecordPersistentWorker(ModuleDefineHolder moduleDefineHolder, Model model, IRecordDAO recordDAO) {
+    RecordPersistentWorker(ModuleDefineHolder moduleDefineHolder, Model model, IRecordDAO recordDAO, AbstractWorker<Record> nextExportWorker) {
         super(moduleDefineHolder);
         this.model = model;
         this.recordDAO = recordDAO;
         this.batchDAO = moduleDefineHolder.find(StorageModule.NAME).provider().getService(IBatchDAO.class);
+        this.nextExportWorker = Optional.ofNullable(nextExportWorker);
     }
 
     @Override
     public void in(Record record) {
         try {
             InsertRequest insertRequest = recordDAO.prepareBatchInsert(model, record);
-            batchDAO.asynchronous(insertRequest);
+            batchDAO.insert(insertRequest);
         } catch (IOException e) {
-            logger.error(e.getMessage(), e);
+            LOGGER.error(e.getMessage(), e);
         }
+        this.nextExportWorker.ifPresent(exportWorker -> exportWorker.in(record));
     }
 }

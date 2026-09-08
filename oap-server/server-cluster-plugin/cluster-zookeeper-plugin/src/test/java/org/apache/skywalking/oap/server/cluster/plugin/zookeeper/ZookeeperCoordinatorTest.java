@@ -25,12 +25,15 @@ import org.apache.curator.x.discovery.ServiceDiscovery;
 import org.apache.curator.x.discovery.ServiceInstance;
 import org.apache.skywalking.oap.server.core.cluster.RemoteInstance;
 import org.apache.skywalking.oap.server.core.remote.client.Address;
-import org.junit.Before;
-import org.junit.Test;
+import org.apache.skywalking.oap.server.library.module.ModuleDefineHolder;
+import org.apache.skywalking.oap.server.telemetry.api.HealthCheckMetrics;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.apache.skywalking.oap.server.testing.util.ReflectUtil;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
@@ -45,6 +48,8 @@ public class ZookeeperCoordinatorTest {
 
     private ServiceCacheBuilder cacheBuilder = mock(ServiceCacheBuilder.class);
 
+    private HealthCheckMetrics healthChecker = mock(HealthCheckMetrics.class);
+
     private ServiceCache serviceCache = mock(ServiceCache.class);
 
     private ZookeeperCoordinator coordinator;
@@ -53,7 +58,7 @@ public class ZookeeperCoordinatorTest {
 
     private Address selfAddress = new Address("127.0.0.1", 1000, true);
 
-    @Before
+    @BeforeEach
     public void setUp() throws Exception {
         when(cacheBuilder.name("remote")).thenReturn(cacheBuilder);
         when(cacheBuilder.build()).thenReturn(serviceCache);
@@ -61,7 +66,10 @@ public class ZookeeperCoordinatorTest {
         doNothing().when(serviceDiscovery).registerService(any());
         when(serviceDiscovery.serviceCacheBuilder()).thenReturn(cacheBuilder);
         config.setHostPort(address.getHost() + ":" + address.getPort());
-        coordinator = new ZookeeperCoordinator(config, serviceDiscovery);
+        doNothing().when(healthChecker).health();
+        ModuleDefineHolder manager = mock(ModuleDefineHolder.class);
+        coordinator = new ZookeeperCoordinator(manager, config, serviceDiscovery);
+        ReflectUtil.setInternalState(coordinator, "healthChecker", healthChecker);
     }
 
     @Test

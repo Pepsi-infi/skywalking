@@ -1,0 +1,241 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+cluster:
+  selector: ${SW_CLUSTER:standalone}
+  standalone:
+core:
+  selector: ${SW_CORE:default}
+  default:
+    # Mixed: Receive agent data, Level 1 aggregate, Level 2 aggregate
+    # Receiver: Receive agent data, Level 1 aggregate
+    # Aggregator: Level 2 aggregate
+    role: ${SW_CORE_ROLE:Mixed} # Mixed/Receiver/Aggregator
+    restHost: ${SW_CORE_REST_HOST:0.0.0.0}
+    restPort: ${SW_CORE_REST_PORT:12800}
+    restContextPath: ${SW_CORE_REST_CONTEXT_PATH:/}
+    restMaxThreads: ${SW_CORE_REST_MAX_THREADS:200}
+    restIdleTimeOut: ${SW_CORE_REST_IDLE_TIMEOUT:30000}
+    restAcceptQueueSize: ${SW_CORE_REST_QUEUE_SIZE:0}
+    httpMaxRequestHeaderSize: ${SW_CORE_HTTP_MAX_REQUEST_HEADER_SIZE:8192}
+    gRPCHost: ${SW_CORE_GRPC_HOST:0.0.0.0}
+    gRPCPort: ${SW_CORE_GRPC_PORT:11800}
+    maxConcurrentCallsPerConnection: ${SW_CORE_GRPC_MAX_CONCURRENT_CALL:0}
+    maxMessageSize: ${SW_CORE_GRPC_MAX_MESSAGE_SIZE:0}
+    gRPCThreadPoolSize: ${SW_CORE_GRPC_THREAD_POOL_SIZE:-1}
+    gRPCSslEnabled: ${SW_CORE_GRPC_SSL_ENABLED:false}
+    gRPCSslKeyPath: ${SW_CORE_GRPC_SSL_KEY_PATH:""}
+    gRPCSslCertChainPath: ${SW_CORE_GRPC_SSL_CERT_CHAIN_PATH:""}
+    gRPCSslTrustedCAPath: ${SW_CORE_GRPC_SSL_TRUSTED_CA_PATH:""}
+    downsampling:
+      - Hour
+      - Day
+    # Set a timeout on metrics data. After the timeout has expired, the metrics data will automatically be deleted.
+    enableDataKeeperExecutor: ${SW_CORE_ENABLE_DATA_KEEPER_EXECUTOR:true} # Turn it off then automatically metrics data delete will be close.
+    dataKeeperExecutePeriod: ${SW_CORE_DATA_KEEPER_EXECUTE_PERIOD:5} # How often the data keeper executor runs periodically, unit is minute
+    recordDataTTL: ${SW_CORE_RECORD_DATA_TTL:3} # Unit is day
+    metricsDataTTL: ${SW_CORE_METRICS_DATA_TTL:7} # Unit is day
+    # The period of L1 aggregation flush to L2 aggregation. Unit is ms.
+    l1FlushPeriod: ${SW_CORE_L1_AGGREGATION_FLUSH_PERIOD:500}
+    # The threshold of session time. Unit is ms. Default value is 70s.
+    storageSessionTimeout: ${SW_CORE_STORAGE_SESSION_TIMEOUT:70000}
+    # The period of doing data persistence. Unit is second.Default value is 25s
+    persistentPeriod: ${SW_CORE_PERSISTENT_PERIOD:25}
+    topNReportPeriod: ${SW_CORE_TOPN_REPORT_PERIOD:10} # top_n record worker report cycle, unit is minute
+    # Extra model column are the column defined by in the codes, These columns of model are not required logically in aggregation or further query,
+    # and it will cause more load for memory, network of OAP and storage.
+    # But, being activated, user could see the name in the storage entities, which make users easier to use 3rd party tool, such as Kibana->ES, to query the data by themselves.
+    activeExtraModelColumns: ${SW_CORE_ACTIVE_EXTRA_MODEL_COLUMNS:false}
+    # The max length of service + instance names should be less than 200
+    serviceNameMaxLength: ${SW_SERVICE_NAME_MAX_LENGTH:70}
+    # The period(in seconds) of refreshing the service cache. Default value is 10s.
+    serviceCacheRefreshInterval: ${SW_SERVICE_CACHE_REFRESH_INTERVAL:10}
+    instanceNameMaxLength: ${SW_INSTANCE_NAME_MAX_LENGTH:70}
+    # The max length of service + endpoint names should be less than 240
+    endpointNameMaxLength: ${SW_ENDPOINT_NAME_MAX_LENGTH:150}
+    # Define the set of span tag keys, which should be searchable through the GraphQL.
+    # The max length of key=value should be less than 256 or will be dropped.
+    searchableTracesTags: ${SW_SEARCHABLE_TAG_KEYS:http.method,http.status_code,rpc.status_code,db.type,db.instance,mq.queue,mq.topic,mq.broker}
+    # Define the set of log tag keys, which should be searchable through the GraphQL.
+    # The max length of key=value should be less than 256 or will be dropped.
+    searchableLogsTags: ${SW_SEARCHABLE_LOGS_TAG_KEYS:level,http.status_code}
+    # Define the set of alarm tag keys, which should be searchable through the GraphQL.
+    # The max length of key=value should be less than 256 or will be dropped.
+    searchableAlarmTags: ${SW_SEARCHABLE_ALARM_TAG_KEYS:level}
+    # The max size of tags keys for autocomplete select.
+    autocompleteTagKeysQueryMaxSize: ${SW_AUTOCOMPLETE_TAG_KEYS_QUERY_MAX_SIZE:100}
+    # The max size of tags values for autocomplete select.
+    autocompleteTagValuesQueryMaxSize: ${SW_AUTOCOMPLETE_TAG_VALUES_QUERY_MAX_SIZE:100}
+    # The number of threads used to prepare metrics data to the storage.
+    prepareThreads: ${SW_CORE_PREPARE_THREADS:2}
+    # Turn it on then automatically grouping endpoint by the given OpenAPI definitions.
+    enableEndpointNameGroupingByOpenapi: ${SW_CORE_ENABLE_ENDPOINT_NAME_GROUPING_BY_OPENAPI:true}
+    # The period of HTTP URI pattern recognition. Unit is second.
+    syncPeriodHttpUriRecognitionPattern: ${SW_CORE_SYNC_PERIOD_HTTP_URI_RECOGNITION_PATTERN:10}
+    # The training period of HTTP URI pattern recognition. Unit is second.
+    trainingPeriodHttpUriRecognitionPattern: ${SW_CORE_TRAINING_PERIOD_HTTP_URI_RECOGNITION_PATTERN:60}
+    # The max number of HTTP URIs per service for further URI pattern recognition.
+    maxHttpUrisNumberPerService: ${SW_CORE_MAX_HTTP_URIS_NUMBER_PER_SVR:3000}
+storage:
+  selector: ${SW_STORAGE:banyandb}
+  elasticsearch:
+    namespace: ${SW_NAMESPACE:""}
+    clusterNodes: ${SW_STORAGE_ES_CLUSTER_NODES:localhost:9200}
+    protocol: ${SW_STORAGE_ES_HTTP_PROTOCOL:"http"}
+    connectTimeout: ${SW_STORAGE_ES_CONNECT_TIMEOUT:3000}
+    socketTimeout: ${SW_STORAGE_ES_SOCKET_TIMEOUT:30000}
+    responseTimeout: ${SW_STORAGE_ES_RESPONSE_TIMEOUT:15000}
+    numHttpClientThread: ${SW_STORAGE_ES_NUM_HTTP_CLIENT_THREAD:0}
+    user: ${SW_ES_USER:""}
+    password: ${SW_ES_PASSWORD:""}
+    trustStorePath: ${SW_STORAGE_ES_SSL_JKS_PATH:""}
+    trustStorePass: ${SW_STORAGE_ES_SSL_JKS_PASS:""}
+    secretsManagementFile: ${SW_ES_SECRETS_MANAGEMENT_FILE:""} # Secrets management file in the properties format includes the username, password, which are managed by 3rd party tool.
+    dayStep: ${SW_STORAGE_DAY_STEP:1} # Represent the number of days in the one minute/hour/day index.
+    indexShardsNumber: ${SW_STORAGE_ES_INDEX_SHARDS_NUMBER:1} # Shard number of new indexes
+    indexReplicasNumber: ${SW_STORAGE_ES_INDEX_REPLICAS_NUMBER:1} # Replicas number of new indexes
+    # Specify the settings for each index individually.
+    # If configured, this setting has the highest priority and overrides the generic settings.
+    specificIndexSettings: ${SW_STORAGE_ES_SPECIFIC_INDEX_SETTINGS:""}
+    # Super data set has been defined in the codes, such as trace segments.The following 3 config would be improve es performance when storage super size data in es.
+    superDatasetDayStep: ${SW_STORAGE_ES_SUPER_DATASET_DAY_STEP:-1} # Represent the number of days in the super size dataset record index, the default value is the same as dayStep when the value is less than 0
+    superDatasetIndexShardsFactor: ${SW_STORAGE_ES_SUPER_DATASET_INDEX_SHARDS_FACTOR:5} #  This factor provides more shards for the super data set, shards number = indexShardsNumber * superDatasetIndexShardsFactor. Also, this factor effects Zipkin traces.
+    superDatasetIndexReplicasNumber: ${SW_STORAGE_ES_SUPER_DATASET_INDEX_REPLICAS_NUMBER:0} # Represent the replicas number in the super size dataset record index, the default value is 0.
+    indexTemplateOrder: ${SW_STORAGE_ES_INDEX_TEMPLATE_ORDER:0} # the order of index template
+    bulkActions: ${SW_STORAGE_ES_BULK_ACTIONS:5000} # Execute the async bulk record data every ${SW_STORAGE_ES_BULK_ACTIONS} requests
+    batchOfBytes: ${SW_STORAGE_ES_BATCH_OF_BYTES:10485760} # A threshold to control the max body size of ElasticSearch Bulk flush.
+    # flush the bulk every 5 seconds whatever the number of requests
+    flushInterval: ${SW_STORAGE_ES_FLUSH_INTERVAL:5}
+    concurrentRequests: ${SW_STORAGE_ES_CONCURRENT_REQUESTS:2} # the number of concurrent requests
+    resultWindowMaxSize: ${SW_STORAGE_ES_QUERY_MAX_WINDOW_SIZE:10000}
+    metadataQueryMaxSize: ${SW_STORAGE_ES_QUERY_MAX_SIZE:10000}
+    scrollingBatchSize: ${SW_STORAGE_ES_SCROLLING_BATCH_SIZE:5000}
+    segmentQueryMaxSize: ${SW_STORAGE_ES_QUERY_SEGMENT_SIZE:200}
+    profileTaskQueryMaxSize: ${SW_STORAGE_ES_QUERY_PROFILE_TASK_SIZE:200}
+    profileDataQueryBatchSize: ${SW_STORAGE_ES_QUERY_PROFILE_DATA_BATCH_SIZE:100}
+    oapAnalyzer: ${SW_STORAGE_ES_OAP_ANALYZER:"{\"analyzer\":{\"oap_analyzer\":{\"type\":\"stop\"}}}"} # the oap analyzer.
+    oapLogAnalyzer: ${SW_STORAGE_ES_OAP_LOG_ANALYZER:"{\"analyzer\":{\"oap_log_analyzer\":{\"type\":\"standard\"}}}"} # the oap log analyzer. It could be customized by the ES analyzer configuration to support more language log formats, such as Chinese log, Japanese log and etc.
+    advanced: ${SW_STORAGE_ES_ADVANCED:""}
+    # Enable shard metrics and records indices into multi-physical indices, one index template per metric/meter aggregation function or record.
+    logicSharding: ${SW_STORAGE_ES_LOGIC_SHARDING:false}
+    # Custom routing can reduce the impact of searches. Instead of having to fan out a search request to all the shards in an index, the request can be sent to just the shard that matches the specific routing value (or values).
+    enableCustomRouting: ${SW_STORAGE_ES_ENABLE_CUSTOM_ROUTING:false}
+  mysql:
+    properties:
+      jdbcUrl: ${SW_JDBC_URL:"jdbc:mysql://localhost:3306/swtest?rewriteBatchedStatements=true&allowMultiQueries=true"}
+      dataSource.user: ${SW_DATA_SOURCE_USER:root}
+      dataSource.password: ${SW_DATA_SOURCE_PASSWORD:root@1234}
+      dataSource.cachePrepStmts: ${SW_DATA_SOURCE_CACHE_PREP_STMTS:true}
+      dataSource.prepStmtCacheSize: ${SW_DATA_SOURCE_PREP_STMT_CACHE_SQL_SIZE:250}
+      dataSource.prepStmtCacheSqlLimit: ${SW_DATA_SOURCE_PREP_STMT_CACHE_SQL_LIMIT:2048}
+      dataSource.useServerPrepStmts: ${SW_DATA_SOURCE_USE_SERVER_PREP_STMTS:true}
+    metadataQueryMaxSize: ${SW_STORAGE_MYSQL_QUERY_MAX_SIZE:5000}
+    maxSizeOfBatchSql: ${SW_STORAGE_MAX_SIZE_OF_BATCH_SQL:2000}
+    asyncBatchPersistentPoolSize: ${SW_STORAGE_ASYNC_BATCH_PERSISTENT_POOL_SIZE:4}
+  postgresql:
+    properties:
+      jdbcUrl: ${SW_JDBC_URL:"jdbc:postgresql://localhost:5432/skywalking"}
+      dataSource.user: ${SW_DATA_SOURCE_USER:postgres}
+      dataSource.password: ${SW_DATA_SOURCE_PASSWORD:123456}
+      dataSource.cachePrepStmts: ${SW_DATA_SOURCE_CACHE_PREP_STMTS:true}
+      dataSource.prepStmtCacheSize: ${SW_DATA_SOURCE_PREP_STMT_CACHE_SQL_SIZE:250}
+      dataSource.prepStmtCacheSqlLimit: ${SW_DATA_SOURCE_PREP_STMT_CACHE_SQL_LIMIT:2048}
+      dataSource.useServerPrepStmts: ${SW_DATA_SOURCE_USE_SERVER_PREP_STMTS:true}
+    metadataQueryMaxSize: ${SW_STORAGE_MYSQL_QUERY_MAX_SIZE:5000}
+    maxSizeOfBatchSql: ${SW_STORAGE_MAX_SIZE_OF_BATCH_SQL:2000}
+    asyncBatchPersistentPoolSize: ${SW_STORAGE_ASYNC_BATCH_PERSISTENT_POOL_SIZE:4}
+  banyandb:
+    # Since 10.2.0, the banyandb configuration is separated to an independent configuration file: `bydb.yaml`.
+
+agent-analyzer:
+  selector: ${SW_AGENT_ANALYZER:default}
+  default:
+    # The default sampling rate and the default trace latency time configured by the 'traceSamplingPolicySettingsFile' file.
+    traceSamplingPolicySettingsFile: ${SW_TRACE_SAMPLING_POLICY_SETTINGS_FILE:trace-sampling-policy-settings.yml}
+    slowDBAccessThreshold: ${SW_SLOW_DB_THRESHOLD:default:200,mongodb:100} # The slow database access thresholds. Unit ms.
+    forceSampleErrorSegment: ${SW_FORCE_SAMPLE_ERROR_SEGMENT:true} # When sampling mechanism active, this config can open(true) force save some error segment. true is default.
+    segmentStatusAnalysisStrategy: ${SW_SEGMENT_STATUS_ANALYSIS_STRATEGY:FROM_SPAN_STATUS} # Determine the final segment status from the status of spans. Available values are `FROM_SPAN_STATUS` , `FROM_ENTRY_SPAN` and `FROM_FIRST_SPAN`. `FROM_SPAN_STATUS` represents the segment status would be error if any span is in error status. `FROM_ENTRY_SPAN` means the segment status would be determined by the status of entry spans only. `FROM_FIRST_SPAN` means the segment status would be determined by the status of the first span only.
+    # Nginx and Envoy agents can't get the real remote address.
+    # Exit spans with the component in the list would not generate the client-side instance relation metrics.
+    noUpstreamRealAddressAgents: ${SW_NO_UPSTREAM_REAL_ADDRESS:6000,9000}
+    meterAnalyzerActiveFiles: ${SW_METER_ANALYZER_ACTIVE_FILES:datasource,threadpool,satellite,go-runtime,python-runtime,continuous-profiling} # Which files could be meter analyzed, files split by ","
+    slowCacheReadThreshold: ${SW_SLOW_CACHE_SLOW_READ_THRESHOLD:default:20,redis:10} # The slow cache read operation thresholds. Unit ms.
+    slowCacheWriteThreshold: ${SW_SLOW_CACHE_SLOW_WRITE_THRESHOLD:default:20,redis:10} # The slow cache write operation thresholds. Unit ms.
+
+log-analyzer:
+  selector: ${SW_LOG_ANALYZER:default}
+  default:
+    lalFiles: ${SW_LOG_LAL_FILES:envoy-als,mesh-dp,mysql-slowsql,pgsql-slowsql,redis-slowsql,k8s-service,nginx,default}
+    malFiles: ${SW_LOG_MAL_FILES:"nginx"}
+
+event-analyzer:
+  selector: ${SW_EVENT_ANALYZER:default}
+  default:
+
+# The GraphQL query module requires the AI agent conversation module.
+ai-agent-conversation:
+  selector: ${SW_AI_AGENT_CONVERSATION:default}
+  default:
+    fileReadWindow: ${SW_AI_AGENT_CONVERSATION_FILE_READ_WINDOW:16}
+    roundReadWindow: ${SW_AI_AGENT_CONVERSATION_ROUND_READ_WINDOW:16}
+    maxListLimit: ${SW_AI_AGENT_CONVERSATION_MAX_LIST_LIMIT:10000}
+    viewRequestTimeout: ${SW_AI_AGENT_CONVERSATION_VIEW_REQUEST_TIMEOUT:120}
+    # The largest file stored, in bytes; a larger one is rejected at ingest. Under BanyanDB's 16 MiB gRPC message limit.
+    maxFileBytes: ${SW_AI_AGENT_CONVERSATION_MAX_FILE_BYTES:15728640}
+    # The most bytes one window read may answer with, applied to that read alone where the storage caps a response per call.
+    maxResponseBytes: ${SW_AI_AGENT_CONVERSATION_MAX_RESPONSE_BYTES:104857600}
+
+query:
+  selector: ${SW_QUERY:graphql}
+  graphql:
+    # Enable the log testing API to test the LAL.
+    # NOTE: This API evaluates untrusted code on the OAP server.
+    # A malicious script can do significant damage (steal keys and secrets, remove files and directories, install malware, etc).
+    # As such, please enable this API only when you completely trust your users.
+    enableLogTestTool: ${SW_QUERY_GRAPHQL_ENABLE_LOG_TEST_TOOL:false}
+    # Maximum complexity allowed for the GraphQL query that can be used to
+    # abort a query if the total number of data fields queried exceeds the defined threshold.
+    maxQueryComplexity: ${SW_QUERY_MAX_QUERY_COMPLEXITY:3000}
+    # "On demand log" allows users to fetch Pod containers' log in real time,
+    # because this might expose secrets in the logs (if any), users need
+    # to enable this manually, and add permissions to OAP cluster role.
+    enableOnDemandPodLog: ${SW_ENABLE_ON_DEMAND_POD_LOG:false}
+
+alarm:
+  selector: ${SW_ALARM:default}
+  default:
+
+telemetry:
+  selector: ${SW_TELEMETRY:none}
+  none:
+
+configuration:
+  selector: ${SW_CONFIGURATION:none}
+  none:
+
+health-checker:
+  selector: ${SW_HEALTH_CHECKER:-}
+  default:
+    checkIntervalSeconds: ${SW_HEALTH_CHECKER_INTERVAL_SECONDS:5}
+
+ai-pipeline:
+  selector: ${SW_AI_PIPELINE:default}
+  default:
+    uriRecognitionServerAddr: ${SW_AI_PIPELINE_URI_RECOGNITION_SERVER_ADDR:}
+    uriRecognitionServerPort: ${SW_AI_PIPELINE_URI_RECOGNITION_SERVER_PORT:17128}
+
+data-generator:
+  selector: ${SW_DATA_GENERATOR:default}
+  default:

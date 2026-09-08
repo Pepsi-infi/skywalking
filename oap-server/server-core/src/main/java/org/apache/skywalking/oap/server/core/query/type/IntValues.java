@@ -18,22 +18,39 @@
 
 package org.apache.skywalking.oap.server.core.query.type;
 
+import io.vavr.collection.Stream;
+import io.vavr.control.Option;
 import java.util.ArrayList;
 import java.util.List;
+import lombok.Getter;
 
 public class IntValues {
+    @Getter
     private List<KVInt> values = new ArrayList<>();
 
     public void addKVInt(KVInt e) {
         values.add(e);
     }
 
-    public long findValue(String id, int defaultValue) {
+    /**
+     * Return defaultValue if absent.
+     */
+    public KVInt findValue(String id, int defaultValue) {
         for (KVInt value : values) {
             if (value.getId().equals(id)) {
-                return value.getValue();
+                return value;
             }
         }
-        return defaultValue;
+
+        return new KVInt(id, defaultValue, true);
+    }
+
+    public NullableValue latestValue(int defaultValue) {
+        Option<KVInt> kvInt = Stream.ofAll(values).findLast(v -> !v.isEmptyValue());
+        if (kvInt.isEmpty()) {
+            return new NullableValue(defaultValue, true);
+        } else {
+            return new NullableValue(kvInt.get().getValue(), kvInt.get().isEmptyValue());
+        }
     }
 }

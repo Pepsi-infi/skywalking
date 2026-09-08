@@ -20,75 +20,169 @@ package org.apache.skywalking.oap.server.storage.plugin.elasticsearch;
 
 import lombok.Getter;
 import lombok.Setter;
+import org.apache.skywalking.oap.server.core.storage.annotation.ElasticSearch;
+import org.apache.skywalking.oap.server.core.storage.annotation.SuperDataset;
 import org.apache.skywalking.oap.server.library.module.ModuleConfig;
 
 @Getter
+@Setter
 public class StorageModuleElasticsearchConfig extends ModuleConfig {
-    @Setter
-    private String nameSpace;
-    @Setter
+    private String namespace;
     private String clusterNodes;
-    @Getter
-    @Setter
     String protocol = "http";
-    @Setter
-    private int indexShardsNumber = 2;
-    @Setter
-    private int indexReplicasNumber = 0;
-    @Setter
-    private int indexRefreshInterval = 2;
-    @Setter
-    private int bulkActions = 2000;
-    @Setter
-    private int flushInterval = 10;
-    @Setter
-    private int concurrentRequests = 2;
-    @Setter
-    private int syncBulkActions = 3;
     /**
-     * @since 7.0.0 This could be managed inside {@link #secretsManagementFile}
+     * Connect timeout of ElasticSearch client.
+     *
+     * @since 8.7.0
      */
-    @Setter
-    private String user;
+    private int connectTimeout = 3000;
     /**
-     * @since 7.0.0 This could be managed inside {@link #secretsManagementFile}
+     * Socket timeout of ElasticSearch client.
+     *
+     * @since 8.7.0
      */
-    @Setter
-    private String password;
+    private int socketTimeout = 30000;
     /**
-     * Secrets management file includes the username, password, which are managed by 3rd party tool.
+     * @since 9.0.0 the response timeout of ElasticSearch client (Armeria under the hood), set to 0 to disable response
+     * timeout.
      */
-    @Getter
-    private String secretsManagementFile;
-    @Getter
-    @Setter
-    private String trustStorePath;
+    private int responseTimeout = 15000;
     /**
-     * @since 7.0.0 This could be managed inside {@link #secretsManagementFile}
-     */
-    @Getter
-    @Setter
-    private String trustStorePass;
-    /**
-     * Since 6.4.0, the index of metrics and traces data in minute/hour/month precision are organized in days. ES
+     * @since 6.4.0, the index of metrics and traces data in minute/hour/month precision are organized in days. ES
      * storage creates new indexes in every day.
      *
      * @since 7.0.0 dayStep represents how many days a single one index represents. Default is 1, meaning no difference
      * with previous versions. But if there isn't much traffic for single one day, user could set the step larger to
      * reduce the number of indexes, and keep the TTL longer.
-     *
      */
-    @Getter
     private int dayStep = 1;
-    @Setter
+    private int indexReplicasNumber = 0;
+    private int indexShardsNumber = 1;
+    /**
+     * @since 9.3.0, Specify the settings for each index individually.
+     * Use JSON format and the index name in the config should exclude the `${SW_NAMESPACE}` e.g.
+     * {"metrics-all":{"number_of_shards":"3","number_of_replicas":"2"},"segment":{"number_of_shards":"6","number_of_replicas":"1"}}
+     * If configured, this setting has the highest priority and overrides the generic settings.
+     */
+    private String specificIndexSettings;
+
+    /**
+     * @since 8.2.0, the record day step is for super size dataset record index rolling when the value of it is greater
+     * than 0
+     */
+    private int superDatasetDayStep = -1;
+    /**
+     * @see SuperDataset
+     * @since 8.2.0, the replicas number is for super size dataset record replicas number
+     */
+    private int superDatasetIndexReplicasNumber = 0;
+    private int superDatasetIndexShardsFactor = 5;
+    private int indexRefreshInterval = 2;
+
+    /**
+     * @since 8.7.0 The order of index template.
+     */
+    private int indexTemplateOrder = 0;
+
+    /**
+     * @since 8.7.0 This setting affects all traces/logs/metrics/metadata flush policy.
+     */
+    private int bulkActions = 5000;
+
+    private int batchOfBytes = 1024 * 1024 * 10;
+    /**
+     * Period of flush, no matter `bulkActions` reached or not.
+     * Unit is second.
+     */
+    private int flushInterval = 5;
+    private int concurrentRequests = 2;
+    /**
+     * @since 7.0.0 This could be managed inside {@link #secretsManagementFile}
+     */
+    private String user;
+    /**
+     * @since 7.0.0 This could be managed inside {@link #secretsManagementFile}
+     */
+    private String password;
+    /**
+     * Secrets management file includes the username, password, which are managed by 3rd party tool.
+     */
+    private String secretsManagementFile;
+    private String trustStorePath;
+    /**
+     * @since 7.0.0 This could be managed inside {@link #secretsManagementFile}
+     */
+    private String trustStorePass;
+    /**
+     * Path to the keystore file for client certificate authentication (OpenSearch/Elasticsearch mTLS).
+     * This enables mutual TLS where the client presents a certificate to the server.
+     * Supports PKCS12 (.p12, .pfx) and JKS (.jks) formats.
+     * When set, {@link #keyStorePass} must also be provided.
+     */
+    private String keyStorePath;
+    /**
+     * Password for the keystore file specified in {@link #keyStorePath}.
+     * Required when {@link #keyStorePath} is set.
+     * This could be managed inside {@link #secretsManagementFile}
+     */
+    private String keyStorePass;
     private int resultWindowMaxSize = 10000;
-    @Setter
     private int metadataQueryMaxSize = 5000;
-    @Setter
+    /**
+     * @since 9.0.0 The batch size that is used to scroll on the large results,
+     * if {@link #metadataQueryMaxSize} is larger than the maximum result window in
+     * ElasticSearch server, this can be used to retrieve all results.
+     */
+    private int scrollingBatchSize = 5000;
     private int segmentQueryMaxSize = 200;
-    @Setter
     private int profileTaskQueryMaxSize = 200;
-    @Setter
+    /**
+     * The batch size that is used to scroll on the large eBPF profiling data result.
+     * The profiling data contains full-stack symbol data, which could make ElasticSearch response large content.
+     * {@link #scrollingBatchSize} would not be used in profiling data query.
+     */
+    private int profileDataQueryBatchSize = 100;
+    /**
+     * The default analyzer for match query field. {@link ElasticSearch.MatchQuery.AnalyzerType#OAP_ANALYZER}
+     *
+     * @since 8.4.0
+     */
+    private String oapAnalyzer = "{\"analyzer\":{\"oap_analyzer\":{\"type\":\"stop\"}}}";
+    /**
+     * The log analyzer for match query field. {@link ElasticSearch.MatchQuery.AnalyzerType#OAP_LOG_ANALYZER}
+     *
+     * @since 8.4.0
+     */
+    private String oapLogAnalyzer = "{\"analyzer\":{\"oap_log_analyzer\":{\"type\":\"standard\"}}}";
     private String advanced;
 
+    /**
+     * The number of threads for the underlying HTTP client to perform socket I/O.
+     * If the value is {@code <= 0}, the number of available processors will be used.
+     */
+    private int numHttpClientThread;
+
+    /**
+     * If disabled, all metrics would be persistent in one physical index template, to reduce the number of physical indices.
+     * If enabled, shard metrics indices into multi-physical indices, one index template per metric/meter aggregation function.
+     *
+     * @since 9.2.0
+     */
+    private boolean logicSharding = false;
+
+    /**
+     * if enabled, custom routing values will be used, to reduce the number of shards that need to be searched.
+     */
+    private boolean enableCustomRouting = false;
+
+    /**
+     * Max size of {@link org.apache.skywalking.oap.server.core.query.type.AsyncProfilerTask} to be fetched
+     * in a single request.
+     */
+    private int asyncProfilerTaskQueryMaxSize;
+    /**
+     * Max size of {@link org.apache.skywalking.oap.server.core.query.type.PprofTask} to be fetched
+     * in a single request.
+     */
+    private int pprofTaskQueryMaxSize;
 }

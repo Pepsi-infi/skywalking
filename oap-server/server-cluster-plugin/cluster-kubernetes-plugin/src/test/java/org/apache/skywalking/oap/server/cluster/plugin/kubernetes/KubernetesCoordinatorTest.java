@@ -18,150 +18,257 @@
 
 package org.apache.skywalking.oap.server.cluster.plugin.kubernetes;
 
-import org.apache.skywalking.oap.server.cluster.plugin.kubernetes.fixture.PlainWatch;
-import org.apache.skywalking.oap.server.core.CoreModule;
-import org.apache.skywalking.oap.server.core.CoreModuleConfig;
+import com.linecorp.armeria.client.Endpoint;
+import com.linecorp.armeria.client.endpoint.DynamicEndpointGroup;
 import org.apache.skywalking.oap.server.core.cluster.RemoteInstance;
-import org.apache.skywalking.oap.server.core.config.ConfigService;
-import org.apache.skywalking.oap.server.core.remote.client.Address;
-import org.apache.skywalking.oap.server.library.module.ModuleDefineHolder;
-import org.apache.skywalking.oap.server.testing.module.ModuleDefineTesting;
-import org.apache.skywalking.oap.server.testing.module.ModuleManagerTesting;
-import org.junit.Test;
-import org.mockito.Mockito;
+import org.apache.skywalking.oap.server.telemetry.api.HealthCheckMetrics;
+import org.apache.skywalking.oap.server.testing.util.ReflectUtil;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 
-import static org.hamcrest.core.Is.is;
-import static org.junit.Assert.assertThat;
-import static org.mockito.Mockito.when;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.spy;
+
+/**
+ * Tests for {@link KubernetesCoordinator} listener behavior, focusing on the
+ * self-endpoint race condition during K8s informer startup.
+ *
+ * <h3>Workflow: Self-endpoint race condition during OAP pod startup</h3>
+ * <pre>
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │                   OAP Pod Startup Sequence                              │
+ * ├─────────────────────────────────────────────────────────────────────────┤
+ * │                                                                         │
+ * │  1. Constructor: .inform() starts K8s informer (async)                  │
+ * │  2. Constructor: updateEndpoints() called immediately                   │
+ * │                                                                         │
+ * │  ┌──────────────── Informer Cache State ───────────────────┐            │
+ * │  │  Only remote pod cached (self pod NOT synced yet)       │            │
+ * │  └────────────────────────────────────────────────────────-┘            │
+ * │                           │                                             │
+ * │                           ▼                                             │
+ * │  ┌──────────────── updateEndpoints() ──────────────────────┐            │
+ * │  │  endpoints = [remote_pod_ip]                            │            │
+ * │  │  selfEndpoint = null  (self not in informer yet)        │            │
+ * │  └────────────────────────┬────────────────────────────────┘            │
+ * │                           │                                             │
+ * │                           ▼                                             │
+ * │  ┌──────────────── Coordinator Listener ───────────────────┐            │
+ * │  │  getSelfEndpoint() == null                              │            │
+ * │  │  Fallback: add 127.0.0.1 as self                       │            │
+ * │  │  result = [remote_pod(self=false), 127.0.0.1(self=true)]│            │
+ * │  │                                                         │            │
+ * │  │  *** Tested by: shouldFallbackTo127WhenSelfNotSynced ** │            │
+ * │  └────────────────────────┬────────────────────────────────┘            │
+ * │                           │                                             │
+ * │  ═══════════ Time passes, informer syncs self pod ══════════            │
+ * │                           │                                             │
+ * │                           ▼                                             │
+ * │  ┌──────────────── updateEndpoints() (2nd call) ───────────┐            │
+ * │  │  selfEndpoint = real_pod_ip  (now set correctly)        │            │
+ * │  │  endpoints = [remote_pod_ip, self_pod_ip]               │            │
+ * │  │  List CHANGED (1 to 2 entries) → listener fires again   │            │
+ * │  └────────────────────────┬────────────────────────────────┘            │
+ * │                           │                                             │
+ * │                           ▼                                             │
+ * │  ┌──────────────── Coordinator Listener (2nd fire) ────────┐            │
+ * │  │  getSelfEndpoint() == real_pod_ip                       │            │
+ * │  │  Match self in endpoint list, mark isSelf=true          │            │
+ * │  │  result = [remote_pod(self=false), self_pod(self=true)] │            │
+ * │  │  127.0.0.1 fallback is gone                             │            │
+ * │  │                                                         │            │
+ * │  │  *** Tested by: shouldResolveSelfAfterInformerSync ***  │            │
+ * │  └────────────────────────┬────────────────────────────────┘            │
+ * │                           │                                             │
+ * │                           ▼                                             │
+ * │  ┌──────────────── TTL Leader Election ────────────────────┐            │
+ * │  │  sort([10.x.x.x, 10.x.x.y]) → deterministic ordering  │            │
+ * │  │  Exactly one node is self → stable leader selection     │            │
+ * │  │                                                         │            │
+ * │  │  *** Tested by: shouldElectTTLLeaderCorrectlyWithRealIPs│            │
+ * │  └────────────────────────────────────────────────────────-┘            │
+ * │                                                                         │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * </pre>
+ */
+@ExtendWith(MockitoExtension.class)
 public class KubernetesCoordinatorTest {
 
+    private static final int GRPC_PORT = 11800;
+    private static final String REMOTE_POD_IP = "10.116.2.203";
+    private static final String SELF_POD_IP = "10.116.2.100";
+
+    @Mock
+    private HealthCheckMetrics healthChecker;
+
     private KubernetesCoordinator coordinator;
+    private TestEndpointGroup testEndpointGroup;
 
-    @Test
-    public void assertAdded() throws InterruptedException {
-        PlainWatch watch = PlainWatch.create(2, "ADDED", "1", "10.0.0.1", "ADDED", "2", "10.0.0.2");
-        coordinator = new KubernetesCoordinator(getManager(), watch, () -> "1");
+    @BeforeEach
+    public void setUp() throws Exception {
+        final var config = new ClusterModuleKubernetesConfig();
+        config.setLabelSelector("app=oap");
+
+        testEndpointGroup = new TestEndpointGroup();
+
+        coordinator = spy(new KubernetesCoordinator(null, config));
+        ReflectUtil.setInternalState(coordinator, "port", GRPC_PORT);
+        ReflectUtil.setInternalState(coordinator, "healthChecker", healthChecker);
+        doReturn(testEndpointGroup).when(coordinator).createEndpointGroup();
+
         coordinator.start();
-        coordinator.registerRemote(new RemoteInstance(new Address("0.0.0.0", 8454, true)));
-        watch.await();
-        assertThat(coordinator.queryRemoteNodes().size(), is(2));
-        assertThat(coordinator.queryRemoteNodes()
-                              .stream()
-                              .filter(instance -> instance.getAddress().isSelf())
-                              .findFirst()
-                              .get()
-                              .getAddress()
-                              .getHost(), is("10.0.0.1"));
     }
 
+    /**
+     * Simulates the initial race window: informer has NOT synced the self pod yet.
+     * Only the remote pod is in the endpoint list, and {@code getSelfEndpoint()} returns null.
+     * The coordinator should fall back to 127.0.0.1 for self.
+     *
+     * <p>See "Coordinator Listener" (1st fire) in the class-level workflow diagram.
+     */
     @Test
-    public void assertModified() throws InterruptedException {
-        PlainWatch watch = PlainWatch.create(3, "ADDED", "1", "10.0.0.1", "ADDED", "2", "10.0.0.2", "MODIFIED", "1", "10.0.0.3");
-        coordinator = new KubernetesCoordinator(getManager(), watch, () -> "1");
-        coordinator.start();
-        coordinator.registerRemote(new RemoteInstance(new Address("0.0.0.0", 8454, true)));
-        watch.await();
-        assertThat(coordinator.queryRemoteNodes().size(), is(2));
-        assertThat(coordinator.queryRemoteNodes()
-                              .stream()
-                              .filter(instance -> instance.getAddress().isSelf())
-                              .findFirst()
-                              .get()
-                              .getAddress()
-                              .getHost(), is("10.0.0.3"));
+    public void shouldFallbackTo127WhenSelfNotSynced() {
+        testEndpointGroup.fireEndpoints(
+            List.of(Endpoint.of(REMOTE_POD_IP, GRPC_PORT)));
+
+        final List<RemoteInstance> instances = coordinator.queryRemoteNodes();
+        assertEquals(2, instances.size());
+
+        final RemoteInstance remote = findByHost(instances, REMOTE_POD_IP);
+        assertFalse(remote.getAddress().isSelf());
+
+        final RemoteInstance self = findByHost(instances, "127.0.0.1");
+        assertTrue(self.getAddress().isSelf());
     }
 
+    /**
+     * Simulates the full race-then-recovery sequence: after the informer syncs
+     * the self pod, the endpoint list grows from 1 to 2 entries, so
+     * {@link DynamicEndpointGroup} fires the listener again. This time
+     * {@code getSelfEndpoint()} returns the real IP and self is correctly identified.
+     *
+     * <p>Previously, self was excluded from the endpoint list, so the list
+     * didn't change when self appeared. {@link DynamicEndpointGroup} deduplicated
+     * and never re-fired the listener, leaving self stuck at 127.0.0.1.
+     *
+     * <p>See "Coordinator Listener" (1st + 2nd fire) in the class-level workflow diagram.
+     */
     @Test
-    public void assertDeleted() throws InterruptedException {
-        PlainWatch watch = PlainWatch.create(3, "ADDED", "1", "10.0.0.1", "ADDED", "2", "10.0.0.2", "DELETED", "2", "10.0.0.2");
-        coordinator = new KubernetesCoordinator(getManager(), watch, () -> "1");
-        coordinator.start();
-        coordinator.registerRemote(new RemoteInstance(new Address("0.0.0.0", 8454, true)));
-        watch.await();
-        assertThat(coordinator.queryRemoteNodes().size(), is(1));
-        assertThat(coordinator.queryRemoteNodes()
-                              .stream()
-                              .filter(instance -> instance.getAddress().isSelf())
-                              .findFirst()
-                              .get()
-                              .getAddress()
-                              .getHost(), is("10.0.0.1"));
+    public void shouldResolveSelfAfterInformerSync() {
+        // Phase 1: informer hasn't synced self yet
+        testEndpointGroup.fireEndpoints(
+            List.of(Endpoint.of(REMOTE_POD_IP, GRPC_PORT)));
+
+        List<RemoteInstance> instances = coordinator.queryRemoteNodes();
+        assertEquals(2, instances.size());
+        assertTrue(findByHost(instances, "127.0.0.1").getAddress().isSelf(),
+            "Before sync, self should be 127.0.0.1 fallback");
+
+        // Phase 2: informer syncs self pod — endpoint list now includes both pods
+        final Endpoint selfEndpoint = Endpoint.of(SELF_POD_IP, GRPC_PORT);
+        testEndpointGroup.setSelfEndpoint(selfEndpoint);
+        testEndpointGroup.fireEndpoints(List.of(
+            Endpoint.of(REMOTE_POD_IP, GRPC_PORT),
+            selfEndpoint
+        ));
+
+        instances = coordinator.queryRemoteNodes();
+        assertEquals(2, instances.size());
+
+        final RemoteInstance self = findByHost(instances, SELF_POD_IP);
+        assertTrue(self.getAddress().isSelf(),
+            "After sync, self should use real pod IP " + SELF_POD_IP);
+
+        final RemoteInstance remote = findByHost(instances, REMOTE_POD_IP);
+        assertFalse(remote.getAddress().isSelf());
+
+        assertTrue(instances.stream().noneMatch(
+            i -> i.getAddress().getHost().equals("127.0.0.1")),
+            "127.0.0.1 fallback should be gone after self is resolved");
     }
 
+    /**
+     * Verifies that TTL leader election works correctly after self is resolved.
+     * The sorted instance list should have deterministic ordering with real IPs,
+     * and exactly one node should be self.
+     *
+     * <p>See "TTL Leader Election" in the class-level workflow diagram.
+     */
     @Test
-    public void assertError() throws InterruptedException {
-        PlainWatch watch = PlainWatch.create(3, "ADDED", "1", "10.0.0.1", "ERROR", "X", "10.0.0.2", "ADDED", "2", "10.0.0.2");
-        coordinator = new KubernetesCoordinator(getManager(), watch, () -> "1");
-        coordinator.start();
-        coordinator.registerRemote(new RemoteInstance(new Address("0.0.0.0", 8454, true)));
-        watch.await();
-        assertThat(coordinator.queryRemoteNodes().size(), is(2));
-        assertThat(coordinator.queryRemoteNodes()
-                              .stream()
-                              .filter(instance -> instance.getAddress().isSelf())
-                              .findFirst()
-                              .get()
-                              .getAddress()
-                              .getHost(), is("10.0.0.1"));
+    public void shouldElectTTLLeaderCorrectlyWithRealIPs() {
+        final Endpoint selfEndpoint = Endpoint.of(SELF_POD_IP, GRPC_PORT);
+        testEndpointGroup.setSelfEndpoint(selfEndpoint);
+
+        testEndpointGroup.fireEndpoints(List.of(
+            Endpoint.of(REMOTE_POD_IP, GRPC_PORT),
+            selfEndpoint
+        ));
+
+        final List<RemoteInstance> instances = coordinator.queryRemoteNodes();
+        Collections.sort(instances);
+
+        assertEquals(2, instances.size());
+
+        final long selfCount = instances.stream()
+            .filter(i -> i.getAddress().isSelf())
+            .count();
+        assertEquals(1, selfCount, "Exactly one instance should be self");
+
+        final RemoteInstance selfInstance = instances.stream()
+            .filter(i -> i.getAddress().isSelf())
+            .findFirst()
+            .orElseThrow();
+        assertEquals(SELF_POD_IP, selfInstance.getAddress().getHost());
     }
 
-    @Test
-    public void assertModifiedInReceiverRole() throws InterruptedException {
-        PlainWatch watch = PlainWatch.create(3, "ADDED", "1", "10.0.0.1", "ADDED", "2", "10.0.0.2", "MODIFIED", "1", "10.0.0.3");
-        coordinator = new KubernetesCoordinator(getManager(), watch, () -> "1");
-        coordinator.start();
-        watch.await();
-        assertThat(coordinator.queryRemoteNodes().size(), is(2));
-        assertThat(coordinator.queryRemoteNodes()
-                              .stream()
-                              .filter(instance -> instance.getAddress().isSelf())
-                              .findFirst()
-                              .get()
-                              .getAddress()
-                              .getHost(), is("10.0.0.3"));
+    private RemoteInstance findByHost(List<RemoteInstance> instances, String host) {
+        return instances.stream()
+            .filter(i -> i.getAddress().getHost().equals(host))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError(
+                "No instance with host: " + host + ", found: " + instances));
     }
 
-    @Test
-    public void assertDeletedInReceiverRole() throws InterruptedException {
-        PlainWatch watch = PlainWatch.create(3, "ADDED", "1", "10.0.0.1", "ADDED", "2", "10.0.0.2", "DELETED", "2", "10.0.0.2");
-        coordinator = new KubernetesCoordinator(getManager(), watch, () -> "1");
-        coordinator.start();
-        watch.await();
-        assertThat(coordinator.queryRemoteNodes().size(), is(1));
-        assertThat(coordinator.queryRemoteNodes()
-                              .stream()
-                              .filter(instance -> instance.getAddress().isSelf())
-                              .findFirst()
-                              .get()
-                              .getAddress()
-                              .getHost(), is("10.0.0.1"));
-    }
+    /**
+     * A controllable endpoint group for testing. Implements {@link SelfEndpointAccessor}
+     * so the coordinator can resolve self endpoint without requiring a real K8s client.
+     *
+     * <p>Simulates the K8s informer behavior:
+     * <ul>
+     *   <li>Initially selfEndpoint is null (informer hasn't synced self pod yet)</li>
+     *   <li>After calling {@link #setSelfEndpoint}, the next {@link #fireEndpoints} call
+     *       simulates the informer adding the self pod to its cache</li>
+     * </ul>
+     */
+    static class TestEndpointGroup extends DynamicEndpointGroup implements SelfEndpointAccessor {
+        private volatile Endpoint selfEndpoint;
 
-    @Test
-    public void assertErrorInReceiverRole() throws InterruptedException {
-        PlainWatch watch = PlainWatch.create(3, "ADDED", "1", "10.0.0.1", "ERROR", "X", "10.0.0.2", "ADDED", "2", "10.0.0.2");
-        coordinator = new KubernetesCoordinator(getManager(), watch, () -> "1");
-        coordinator.start();
-        watch.await();
-        assertThat(coordinator.queryRemoteNodes().size(), is(2));
-        assertThat(coordinator.queryRemoteNodes()
-                              .stream()
-                              .filter(instance -> instance.getAddress().isSelf())
-                              .findFirst()
-                              .get()
-                              .getAddress()
-                              .getHost(), is("10.0.0.1"));
-    }
+        @Override
+        public Endpoint getSelfEndpoint() {
+            return selfEndpoint;
+        }
 
-    public ModuleDefineHolder getManager() {
-        ModuleManagerTesting moduleManagerTesting = new ModuleManagerTesting();
-        ModuleDefineTesting coreModuleDefine = new ModuleDefineTesting();
-        moduleManagerTesting.put(CoreModule.NAME, coreModuleDefine);
-        CoreModuleConfig config = Mockito.mock(CoreModuleConfig.class);
-        when(config.getGRPCHost()).thenReturn("127.0.0.1");
-        when(config.getGRPCPort()).thenReturn(8454);
-        coreModuleDefine.provider().registerServiceImplementation(ConfigService.class, new ConfigService(config));
-        return moduleManagerTesting;
+        void setSelfEndpoint(Endpoint selfEndpoint) {
+            this.selfEndpoint = selfEndpoint;
+        }
+
+        void fireEndpoints(List<Endpoint> endpoints) {
+            setEndpoints(endpoints);
+        }
+
+        @Override
+        protected void doCloseAsync(CompletableFuture<?> future) {
+            future.complete(null);
+        }
     }
 }

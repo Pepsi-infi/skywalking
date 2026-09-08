@@ -18,6 +18,7 @@
 
 package org.apache.skywalking.oap.server.core.source;
 
+import com.google.gson.JsonObject;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -54,11 +55,27 @@ public class ServiceInstanceJVMGC extends Source {
     private String serviceId;
     @Getter
     @Setter
-    private GCPhrase phrase;
+    private GCPhase phase;
     @Getter
     @Setter
     private long time;
     @Getter
     @Setter
     private long count;
+
+    @Override
+    public String toJson() {
+        final JsonObject obj = new JsonObject();
+        obj.addProperty("scope", scope());
+        obj.addProperty("entityId", getEntityId());
+        obj.addProperty("timeBucket", getTimeBucket());
+        obj.addProperty("id", id);
+        obj.addProperty("name", name);
+        obj.addProperty("serviceName", serviceName);
+        obj.addProperty("serviceId", serviceId);
+        obj.addProperty("phase", phase == null ? null : phase.name());
+        obj.addProperty("time", time);
+        obj.addProperty("count", count);
+        return obj.toString();
+    }
 }

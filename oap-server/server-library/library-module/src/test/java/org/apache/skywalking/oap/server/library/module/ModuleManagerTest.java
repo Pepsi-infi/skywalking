@@ -18,9 +18,12 @@
 
 package org.apache.skywalking.oap.server.library.module;
 
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
 import java.util.Properties;
-import org.junit.Assert;
-import org.junit.Test;
+
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class ModuleManagerTest {
     @Test
@@ -30,12 +33,59 @@ public class ModuleManagerTest {
         configuration.addModule("BaseA").addProviderConfiguration("P-A", new Properties());
         configuration.addModule("BaseB").addProviderConfiguration("P-B", new Properties());
 
-        ModuleManager manager = new ModuleManager();
+        ModuleManager manager = new ModuleManager("Test");
         manager.init(configuration);
 
         BaseModuleA.ServiceABusiness1 serviceABusiness1 = manager.find("BaseA")
                                                                  .provider()
                                                                  .getService(BaseModuleA.ServiceABusiness1.class);
-        Assert.assertTrue(serviceABusiness1 != null);
+        Assertions.assertTrue(serviceABusiness1 != null);
+    }
+
+    @Test
+    public void testModuleConfigInit() throws ModuleConfigException, ModuleNotFoundException, ModuleStartException {
+        ApplicationConfiguration configuration = new ApplicationConfiguration();
+        final Properties settings = new Properties();
+        settings.put("attr1", "abc");
+        settings.put("attr2", 123);
+        settings.put("attr3", 123L);
+        settings.put("attr4", true);
+        configuration.addModule("BaseA").addProviderConfiguration("P-A", settings);
+
+        ModuleManager manager = new ModuleManager("Test");
+        manager.init(configuration);
+
+        final ModuleServiceHolder provider = manager.find("BaseA").provider();
+        Assertions.assertTrue(provider instanceof ModuleAProvider);
+        final ModuleAProvider moduleAProvider = (ModuleAProvider) provider;
+        final ModuleAProviderConfig config = moduleAProvider.getConfig();
+        Assertions.assertEquals("abc", config.getAttr1());
+        Assertions.assertEquals(123, config.getAttr2().intValue());
+        Assertions.assertEquals(123L, config.getAttr3().longValue());
+        Assertions.assertEquals(true, config.isAttr4());
+    }
+
+    @Test
+    public void testModuleMissing() {
+        assertThrows(ModuleNotFoundException.class, () -> {
+            ApplicationConfiguration configuration = new ApplicationConfiguration();
+            configuration.addModule("BaseA").addProviderConfiguration("P-A", new Properties());
+            configuration.addModule("BaseB").addProviderConfiguration("P-B2", new Properties());
+
+            ModuleManager manager = new ModuleManager("Test");
+            manager.init(configuration);
+        });
+    }
+
+    @Test
+    public void testCycleDependency() {
+        assertThrows(CycleDependencyException.class, () -> {
+            ApplicationConfiguration configuration = new ApplicationConfiguration();
+            configuration.addModule("BaseA").addProviderConfiguration("P-A2", new Properties());
+            configuration.addModule("BaseB").addProviderConfiguration("P-B3", new Properties());
+
+            ModuleManager manager = new ModuleManager("Test");
+            manager.init(configuration);
+        });
     }
 }

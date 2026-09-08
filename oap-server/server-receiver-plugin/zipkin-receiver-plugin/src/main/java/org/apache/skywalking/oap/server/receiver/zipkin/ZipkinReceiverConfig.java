@@ -20,16 +20,56 @@ package org.apache.skywalking.oap.server.receiver.zipkin;
 
 import lombok.Getter;
 import lombok.Setter;
+import org.apache.skywalking.oap.server.core.Const;
 import org.apache.skywalking.oap.server.library.module.ModuleConfig;
 
 @Setter
 @Getter
 public class ZipkinReceiverConfig extends ModuleConfig {
-    private String host;
-    private int port;
-    private String contextPath;
-    private int expireTime = 20;
-    private int maxCacheSize = 1_000_000;
-    private boolean needAnalysis = false;
-    private boolean registerZipkinEndpoint = true;
+    // HTTP collector config
+    private boolean enableHttpCollector = true;
+    private String restHost;
+    private int restPort;
+    private String restContextPath;
+    private long restIdleTimeOut = 30000;
+    private int restAcceptQueueSize = 0;
+    /**
+     * TLS settings for this HTTP server. The certificate and key are read from disk and
+     * reloaded on rotation without a restart. Server-side TLS only (no mTLS).
+     */
+    private boolean restSSLEnabled = false;
+    private String restSSLKeyPath;
+    private String restSSLCertChainPath;
+    private String searchableTracesTags = DEFAULT_SEARCHABLE_TAG_KEYS;
+    private int sampleRate = 10000;
+    private int maxSpansPerSecond = 0;
+
+    private static final String DEFAULT_SEARCHABLE_TAG_KEYS = String.join(
+        Const.COMMA,
+        "http.method"
+    );
+    // kafka collector config
+    private boolean enableKafkaCollector = false;
+    /**
+     *  A list of host/port pairs to use for establishing the initial connection to the Kafka cluster.
+     */
+    private String kafkaBootstrapServers;
+
+    private String kafkaGroupId = "zipkin";
+
+    private String kafkaTopic = "zipkin";
+
+    /**
+     * Kafka consumer config,JSON format as Properties. If it contains the same key with above, would override.
+     */
+    private String kafkaConsumerConfig = "{\"auto.offset.reset\":\"earliest\",\"enable.auto.commit\":true}";
+
+    private int kafkaConsumers = 1;
+
+    private int kafkaHandlerThreadPoolSize;
+
+    private int kafkaHandlerThreadPoolQueueSize;
+
+
 }
+

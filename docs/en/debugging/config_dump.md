@@ -1,0 +1,114 @@
+# Dump Effective Initial Configurations
+
+SkyWalking OAP behaviors could be controlled through hundreds of configurations. It is hard to know what is the final
+configuration as all the configurations could be override by system environments.
+
+The core config file [application.yml](../../../oap-server/server-starter/src/main/resources/application.yml) lists all the configurations
+and their default values. However, it is still hard to know the runtime value.
+
+Dump Effective Initial Configurations API is designed to help users to understand the effective configurations, no matter
+they are initialized in the `application.yml`, or override through system environments.
+- URL, `http://{admin-server host}:{admin-server port}/debugging/config/dump`
+  (default `http://127.0.0.1:17128/debugging/config/dump`). Gateway-protect
+  the admin port per the
+  [admin-server security notice](../setup/backend/admin-api/readme.md#-security-notice).
+- HTTP GET method.
+
+```shell
+> curl http://127.0.0.1:17128/debugging/config/dump
+cluster.provider=standalone
+core.provider=default
+core.default.prepareThreads=2
+core.default.restHost=0.0.0.0
+core.default.searchableLogsTags=level,http.status_code
+core.default.role=Mixed
+core.default.persistentPeriod=25
+core.default.syncPeriodHttpUriRecognitionPattern=10
+core.default.restIdleTimeOut=30000
+core.default.dataKeeperExecutePeriod=5
+core.default.topNReportPeriod=10
+core.default.gRPCSslTrustedCAPath=
+core.default.downsampling=[Hour, Day]
+core.default.serviceNameMaxLength=70
+core.default.gRPCSslEnabled=false
+core.default.restPort=12800
+core.default.serviceCacheRefreshInterval=10
+...
+```
+
+All booting configurations with their runtime values are listed, including the selected provider for each module.
+
+This API also provides the response in JSON format, which is more friendly for programmatic usage.
+
+```shell
+> curl -X GET 'http://127.0.0.1:17128/debugging/config/dump' \
+   -H 'Accept: application/json'
+
+// The following JSON is manually formatted for better readability.
+
+{
+   "core.default.autocompleteTagKeysQueryMaxSize":"100",
+   "receiver-sharing-server.default.gRPCPort":"0",
+   "aws-firehose.default.port":"12801",
+   "core.default.restPort":"12800",
+   "receiver-sharing-server.default.gRPCSslCertChainPath":"",
+   "agent-analyzer.default.meterAnalyzerActiveFiles":"datasource,threadpool,satellite,go-runtime,python-runtime,continuous-profiling,java-agent,go-agent,ruby-runtime,php-runtime,nodejs-runtime",
+   "agent-analyzer.default.traceSamplingPolicySettingsFile":"trace-sampling-policy-settings.yml",
+   "core.default.gRPCSslTrustedCAPath":"",
+   "configuration-discovery.default.disableMessageDigest":"false",
+   "core.default.serviceNameMaxLength":"70",
+   "aws-firehose.default.tlsCertChainPath":"",
+   ....
+}
+```
+
+## Protect The Secrets
+
+Some of the configurations contain sensitive values, such as username, password, token, etc. These values would be
+masked
+in the dump result. For example, the `storage.elasticsearch.password` in the following configurations,
+
+```yaml
+storage:
+  selector: ${SW_STORAGE:elasticsearch}
+  elasticsearch:
+    password: ${SW_ES_PASSWORD:""}
+```
+
+It would be masked and shown as `******` in the dump result.
+
+```shell
+> curl http://127.0.0.1:17128/debugging/config/dump
+...
+storage.elasticsearch.password=******
+...
+```
+
+By default, we mask the config keys through the following configurations.
+
+```yaml
+# Include the list of keywords to filter configurations including secrets. Separate keywords by a comma.
+keywords4MaskingSecretsOfConfig: ${SW_DEBUGGING_QUERY_KEYWORDS_FOR_MASKING_SECRETS:user,password,trustStorePass,keyStorePass,token,accessKey,secretKey,authentication}
+```
+
+## BanyanDB Storage Configurations
+
+When BanyanDB is the active storage, the OAP loads its configuration from the dedicated
+`bydb.yml` and `bydb-topn.yml` files (separated out from `application.yml` since 10.2.0). The
+effective, environment-resolved values of these files are included in the same dump under the
+`storage.banyandb.*` keys (TopN rules under `storage.banyandb.topN.*`), for example:
+
+```shell
+> curl http://127.0.0.1:17128/debugging/config/dump
+...
+storage.banyandb.global.targets=127.0.0.1:17912
+storage.banyandb.global.user=******
+storage.banyandb.global.password=******
+storage.banyandb.metricsMinute.ttl=7
+storage.banyandb.topN.endpoint_cpm.endpoint_cpm-service.countersNumber=1000
+...
+```
+
+These rows reflect what the server actually loaded from `bydb.yml` / `bydb-topn.yml` (after
+environment-variable overrides), so editing `storage.banyandb.*` under `application.yml` has no
+effect. Secret values are masked using the same keyword list described above.

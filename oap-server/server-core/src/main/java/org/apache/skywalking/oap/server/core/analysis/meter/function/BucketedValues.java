@@ -21,7 +21,10 @@ package org.apache.skywalking.oap.server.core.analysis.meter.function;
 import java.util.Arrays;
 import java.util.List;
 import lombok.Getter;
+import lombok.Setter;
 import lombok.ToString;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.skywalking.oap.server.core.analysis.metrics.DataLabel;
 import org.apache.skywalking.oap.server.core.analysis.metrics.DataTable;
 import org.apache.skywalking.oap.server.core.query.type.Bucket;
 import org.apache.skywalking.oap.server.core.query.type.HeatMap;
@@ -32,13 +35,15 @@ import org.apache.skywalking.oap.server.core.query.type.HeatMap;
 @ToString
 @Getter
 public class BucketedValues {
+    @Setter
+    private DataLabel labels = new DataLabel();
     /**
      * The element in the buckets represent the minimal value of this bucket, the max is defined by the next element.
      * Such as 0, 10, 50, 100 means buckets are [0, 10), [10, 50), [50, 100), [100, infinite+).
      *
-     * The {@link Integer#MIN_VALUE} could be the first bucket element to indicate there is no minimal value.
+     * The {@link Long#MIN_VALUE} could be the first bucket element to indicate there is no minimal value.
      */
-    private int[] buckets;
+    private long[] buckets;
     /**
      * {@link #buckets} and {@link #values} arrays should have the same length. The element in the values, represents
      * the amount in the same index bucket.
@@ -49,7 +54,7 @@ public class BucketedValues {
      * @param buckets Read {@link #buckets}
      * @param values  Read {@link #values}
      */
-    public BucketedValues(final int[] buckets, final long[] values) {
+    public BucketedValues(final long[] buckets, final long[] values) {
         if (buckets == null || values == null || buckets.length == 0 || values.length == 0) {
             throw new IllegalArgumentException("buckets and values can't be null.");
         }
@@ -65,13 +70,17 @@ public class BucketedValues {
      */
     public boolean isCompatible(DataTable dataset) {
         final List<String> sortedKeys = dataset.sortedKeys(new HeatMap.KeyComparator(true));
-        int[] existedBuckets = new int[sortedKeys.size()];
+        long[] existedBuckets = new long[sortedKeys.size()];
         for (int i = 0; i < sortedKeys.size(); i++) {
-            final String key = sortedKeys.get(i);
+            String key = sortedKeys.get(i);
             if (key.equals(Bucket.INFINITE_NEGATIVE)) {
-                existedBuckets[i] = Integer.MIN_VALUE;
+                existedBuckets[i] = Long.MIN_VALUE;
             } else {
-                existedBuckets[i] = Integer.parseInt(key);
+                // remove the label name
+                if (key.contains(":")) {
+                    key = StringUtils.substringAfterLast(key, ":");
+                }
+                existedBuckets[i] = Long.parseLong(key);
             }
         }
 

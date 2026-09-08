@@ -1,0 +1,262 @@
+/*
+ *   Licensed to the Apache Software Foundation (ASF) under one or more
+ *   contributor license agreements.  See the NOTICE file distributed with
+ *   this work for additional information regarding copyright ownership.
+ *   The ASF licenses this file to You under the Apache License, Version 2.0
+ *   (the "License"); you may not use this file except in compliance with
+ *   the License.  You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ */
+
+package org.apache.skywalking.oap.analyzer.genai.service;
+
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.skywalking.apm.network.common.v3.KeyStringValuePair;
+import org.apache.skywalking.apm.network.language.agent.v3.SegmentObject;
+import org.apache.skywalking.apm.network.language.agent.v3.SpanObject;
+import org.apache.skywalking.oap.analyzer.genai.config.GenAIConfig;
+import org.apache.skywalking.oap.analyzer.genai.matcher.GenAIProviderPrefixMatcher;
+import org.apache.skywalking.oap.server.core.analysis.IDManager;
+import org.apache.skywalking.oap.server.core.analysis.Layer;
+import org.apache.skywalking.oap.server.core.analysis.TimeBucket;
+import org.apache.skywalking.oap.server.core.config.NamingControl;
+import org.apache.skywalking.oap.server.core.source.GenAIMetrics;
+import org.apache.skywalking.oap.server.core.source.GenAIModelAccess;
+import org.apache.skywalking.oap.server.core.source.GenAIProviderAccess;
+import org.apache.skywalking.oap.server.core.source.ServiceInstance;
+import org.apache.skywalking.oap.server.core.source.ServiceMeta;
+import org.apache.skywalking.oap.server.core.source.Source;
+import org.apache.skywalking.oap.server.core.zipkin.source.ZipkinSpan;
+import org.apache.skywalking.oap.server.library.util.StringUtil;
+import org.apache.skywalking.oap.server.library.util.genai.GenAIContextResolver;
+import org.apache.skywalking.oap.server.library.util.genai.GenAISemanticAttributes;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import static java.util.stream.Collectors.toMap;
+
+@Slf4j
+public class GenAIMeterAnalyzer implements IGenAIMeterAnalyzerService {
+
+    private final GenAIProviderPrefixMatcher matcher;
+
+    private NamingControl namingControl;
+
+    public GenAIMeterAnalyzer(GenAIProviderPrefixMatcher matcher) {
+        this.matcher = matcher;
+    }
+
+    public void setNamingControl(NamingControl namingControl) {
+        this.namingControl = namingControl;
+    }
+
+    @Override
+    public GenAIMetrics extractMetricsFromSWSpan(SpanObject span, SegmentObject segment) {
+        Map<String, String> tags = span.getTagsList().stream()
+                .collect(toMap(
+                        KeyStringValuePair::getKey,
+                        KeyStringValuePair::getValue,
+                        (v1, v2) -> v1
+                ));
+
+        final GenAIContextResolver.Result resolvedContext = GenAIContextResolver.resolve(tags);
+        String modelName = resolvedContext.getModelName();
+
+        if (StringUtil.isBlank(modelName)) {
+            if (log.isDebugEnabled()) {
+                log.debug("Model name is missing in span [{}], skipping GenAI analysis", span.getOperationName());
+            }
+            return null;
+        }
+        String provider = resolvedContext.getProviderName();
+
+        GenAIProviderPrefixMatcher.MatchResult matchResult = matcher.match(modelName);
+
+        GenAIConfig.Model modelConfig = matchResult.getModelConfig();
+
+        long inputTokens = parseSafeLong(tags.get(GenAISemanticAttributes.USAGE_INPUT_TOKENS));
+        long outputTokens = parseSafeLong(tags.get(GenAISemanticAttributes.USAGE_OUTPUT_TOKENS));
+
+        double totalCost = calculateTotalCost(modelConfig, inputTokens, outputTokens);
+
+        GenAIMetrics metrics = new GenAIMetrics();
+
+        metrics.setServiceId(IDManager.ServiceID.buildId(provider, Layer.VIRTUAL_GENAI.isNormal()));
+        metrics.setProviderName(provider);
+        metrics.setModelName(modelName);
+        metrics.setInputTokens(inputTokens);
+        metrics.setOutputTokens(outputTokens);
+
+        metrics.setTimeToFirstToken(parseSafeInt(tags.get(GenAISemanticAttributes.SERVER_TIME_TO_FIRST_TOKEN)));
+        metrics.setTotalEstimatedCost(totalCost);
+
+        long latency = span.getEndTime() - span.getStartTime();
+        metrics.setLatency(latency);
+        metrics.setStatus(!span.getIsError());
+        metrics.setTimeBucket(TimeBucket.getMinuteTimeBucket(span.getStartTime()));
+
+        return metrics;
+    }
+
+    @Override
+    public GenAIMetrics extractMetricsFromZipkinSpan(ZipkinSpan zipkinSpan) {
+        JsonObject tags = zipkinSpan.getTags();
+        JsonElement element = tags.get(GenAISemanticAttributes.RESPONSE_MODEL);
+        if (element == null || StringUtil.isBlank(element.getAsString())) {
+            return null;
+        }
+
+        final Map<String, String> contextTags = new HashMap<>();
+        putTag(contextTags, tags, GenAISemanticAttributes.RESPONSE_MODEL);
+        putTag(contextTags, tags, GenAISemanticAttributes.PROVIDER_NAME);
+        putTag(contextTags, tags, GenAISemanticAttributes.SYSTEM_NAME);
+        final GenAIContextResolver.Result resolvedContext = GenAIContextResolver.resolve(contextTags);
+        String modelName = resolvedContext.getModelName();
+        String provider = resolvedContext.getProviderName();
+
+        GenAIProviderPrefixMatcher.MatchResult matchResult = matcher.match(modelName);
+
+        GenAIConfig.Model modelConfig = matchResult.getModelConfig();
+
+        long inputTokens = parseSafeLong(getZipkinSpanTagValue(tags, GenAISemanticAttributes.USAGE_INPUT_TOKENS));
+        long outputTokens = parseSafeLong(getZipkinSpanTagValue(tags, GenAISemanticAttributes.USAGE_OUTPUT_TOKENS));
+
+        double totalCost = calculateTotalCost(modelConfig, inputTokens, outputTokens);
+
+        GenAIMetrics metrics = new GenAIMetrics();
+        metrics.setServiceId(IDManager.ServiceID.buildId(provider, Layer.VIRTUAL_GENAI.isNormal()));
+        metrics.setProviderName(provider);
+        metrics.setModelName(modelName);
+        metrics.setInputTokens(inputTokens);
+        metrics.setOutputTokens(outputTokens);
+        metrics.setTimeToFirstToken(parseSafeInt(
+            getZipkinSpanTagValue(tags, GenAISemanticAttributes.SERVER_TIME_TO_FIRST_TOKEN)));
+        metrics.setTotalEstimatedCost(totalCost);
+        metrics.setLatency(zipkinSpan.getDuration() / 1000);
+        metrics.setStatus(StringUtil.isBlank(getZipkinSpanTagValue(tags, "error")));
+        metrics.setTimeBucket(TimeBucket.getMinuteTimeBucket(zipkinSpan.getTimestamp() / 1000));
+        return metrics;
+    }
+
+    private void putTag(final Map<String, String> target,
+                        final JsonObject source,
+                        final String key) {
+        final String value = getZipkinSpanTagValue(source, key);
+        if (StringUtil.isNotBlank(value)) {
+            target.put(key, value);
+        }
+    }
+
+    @Override
+    public List<Source> transferToSources(GenAIMetrics metrics) {
+        if (metrics == null) {
+            return Collections.emptyList();
+        }
+
+        List<Source> sources = new ArrayList<>();
+        sources.add(toVirtualGenAIServiceMeta(metrics));
+        sources.add(toVirtualGenAIInstance(metrics));
+        sources.add(toProviderAccess(metrics));
+        sources.add(toModelAccess(metrics));
+        return sources;
+    }
+
+    private long parseSafeLong(String value) {
+        if (StringUtil.isEmpty(value)) {
+            return 0;
+        }
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            log.warn("Failed to parse value to long: {}", value);
+            return 0;
+        }
+    }
+
+    private int parseSafeInt(String value) {
+        if (StringUtil.isEmpty(value)) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            log.warn("Failed to parse value to int: {}", value);
+            return 0;
+        }
+    }
+
+    private String getZipkinSpanTagValue(JsonObject tags, String key) {
+        JsonElement element = tags.get(key);
+        return element != null ? element.getAsString() : null;
+    }
+
+    private double calculateTotalCost(GenAIConfig.Model modelConfig, long inputTokens, long outputTokens) {
+        if (modelConfig == null) {
+            return 0.0D;
+        }
+        double cost = 0.0D;
+        if (modelConfig.getInputEstimatedCostPerM() > 0) {
+            cost += inputTokens * modelConfig.getInputEstimatedCostPerM();
+        }
+        if (modelConfig.getOutputEstimatedCostPerM() > 0) {
+            cost += outputTokens * modelConfig.getOutputEstimatedCostPerM();
+        }
+        return cost;
+    }
+
+    private ServiceMeta toVirtualGenAIServiceMeta(GenAIMetrics metrics) {
+        ServiceMeta service = new ServiceMeta();
+        service.setName(namingControl.formatServiceName(metrics.getProviderName()));
+        service.setLayer(Layer.VIRTUAL_GENAI);
+        service.setTimeBucket(metrics.getTimeBucket());
+        return service;
+    }
+
+    private Source toVirtualGenAIInstance(GenAIMetrics metrics) {
+        ServiceInstance instance = new ServiceInstance();
+        instance.setTimeBucket(metrics.getTimeBucket());
+        instance.setName(namingControl.formatInstanceName(metrics.getModelName()));
+        instance.setServiceLayer(Layer.VIRTUAL_GENAI);
+        instance.setServiceName(namingControl.formatServiceName(metrics.getProviderName()));
+        return instance;
+    }
+
+    private GenAIProviderAccess toProviderAccess(GenAIMetrics metrics) {
+        GenAIProviderAccess source = new GenAIProviderAccess();
+        source.setName(namingControl.formatServiceName(metrics.getProviderName()));
+        source.setInputTokens(metrics.getInputTokens());
+        source.setOutputTokens(metrics.getOutputTokens());
+        source.setTotalEstimatedCost(Math.round(metrics.getTotalEstimatedCost()));
+        source.setLatency(metrics.getLatency());
+        source.setStatus(metrics.isStatus());
+        source.setTimeBucket(metrics.getTimeBucket());
+        return source;
+    }
+
+    private GenAIModelAccess toModelAccess(GenAIMetrics metrics) {
+        GenAIModelAccess source = new GenAIModelAccess();
+        source.setServiceName(namingControl.formatServiceName(metrics.getProviderName()));
+        source.setModelName(namingControl.formatInstanceName(metrics.getModelName()));
+        source.setInputTokens(metrics.getInputTokens());
+        source.setOutputTokens(metrics.getOutputTokens());
+        source.setTotalEstimatedCost(Math.round(metrics.getTotalEstimatedCost()));
+        source.setTimeToFirstToken(metrics.getTimeToFirstToken());
+        source.setLatency(metrics.getLatency());
+        source.setStatus(metrics.isStatus());
+        source.setTimeBucket(metrics.getTimeBucket());
+        return source;
+    }
+}

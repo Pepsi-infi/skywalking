@@ -1,0 +1,431 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Feature-focused execution test rules for LAL v2 compiler.
+# Each rule exercises a specific LAL language feature.
+# Paired with execution-basic.input.data for mock input and expected output.
+rules:
+  - name: json-parse-extract
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        extractor {
+          service parsed.service as String
+          instance parsed.instance as String
+          endpoint parsed.endpoint as String
+          layer parsed.layer as String
+        }
+        sink {}
+      }
+
+  - name: tag-condition-true
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        if (tag("LOG_KIND") == "SLOW_SQL") {
+          extractor {
+            service parsed.service as String
+          }
+          sink {}
+        }
+      }
+
+  - name: tag-condition-false
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        if (tag("LOG_KIND") == "SLOW_SQL") {
+          extractor {
+            service parsed.service as String
+          }
+          sink {}
+        }
+      }
+
+  - name: tag-assignment
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        extractor {
+          tag key1: parsed.env as String, key2: parsed.region as String
+        }
+        sink {}
+      }
+
+  - name: safe-nav-missing
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        extractor {
+          service parsed?.missing?.deep as String
+        }
+        sink {}
+      }
+
+  - name: safe-nav-present
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        extractor {
+          service parsed?.data?.name as String
+        }
+        sink {}
+      }
+
+  - name: if-else-if-error
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        if (parsed.level == "ERROR") {
+          extractor { service "error-handler" as String }
+          sink {}
+        } else if (parsed.level == "WARN") {
+          extractor { service "warn-handler" as String }
+          sink {}
+        } else {
+          extractor { service "default-handler" as String }
+          sink {}
+        }
+      }
+
+  - name: if-else-if-warn
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        if (parsed.level == "ERROR") {
+          extractor { service "error-handler" as String }
+          sink {}
+        } else if (parsed.level == "WARN") {
+          extractor { service "warn-handler" as String }
+          sink {}
+        } else {
+          extractor { service "default-handler" as String }
+          sink {}
+        }
+      }
+
+  - name: if-else-if-default
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        if (parsed.level == "ERROR") {
+          extractor { service "error-handler" as String }
+          sink {}
+        } else if (parsed.level == "WARN") {
+          extractor { service "warn-handler" as String }
+          sink {}
+        } else {
+          extractor { service "default-handler" as String }
+          sink {}
+        }
+      }
+
+  - name: sink-enforcer
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        sink {
+          enforcer {}
+        }
+      }
+
+  - name: sink-dropper
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        sink {
+          dropper {}
+        }
+      }
+
+  - name: sampler-rate-limit
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        sink {
+          sampler {
+            rateLimit('test:svc') {
+              rpm 6000
+            }
+          }
+        }
+      }
+
+  - name: sampler-interpolated-id
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        sink {
+          sampler {
+            rateLimit("${parsed.code}") {
+              rpm 6000
+            }
+          }
+        }
+      }
+
+  - name: abort-stops-pipeline
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        abort {}
+        extractor {
+          service parsed.service as String
+        }
+        sink {}
+      }
+
+  - name: conditional-abort-true
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        if (parsed.skip == "true") {
+          abort {}
+        }
+        extractor {
+          service parsed.service as String
+        }
+        sink {}
+      }
+
+  - name: conditional-abort-false
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        if (parsed.skip == "true") {
+          abort {}
+        }
+        extractor {
+          service parsed.service as String
+        }
+        sink {}
+      }
+
+  - name: timestamp-extraction
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        extractor {
+          timestamp parsed.time as String
+        }
+        sink {}
+      }
+
+  - name: text-parser-regexp
+    layer: GENERAL
+    dsl: |
+      filter {
+        text {
+          regexp $/(?<ts>\d+) (?<lvl>\w+) (?<msg>.*)/$
+        }
+        extractor {
+          service parsed.lvl as String
+        }
+        sink {}
+      }
+
+  - name: source-attribute-tag
+    layer: GENERAL
+    dsl: |
+      filter {
+        extractor {
+          tag 'device.model': sourceAttribute("device.model.identifier")
+          tag 'os.name': sourceAttribute("os.name")
+        }
+        sink {}
+      }
+
+  - name: source-attribute-condition
+    layer: GENERAL
+    dsl: |
+      filter {
+        if (sourceAttribute("os.name") == "iOS") {
+          extractor {
+            layer "IOS"
+            tag 'platform': "ios"
+          }
+        }
+        sink {}
+      }
+
+  - name: source-attribute-missing
+    layer: GENERAL
+    dsl: |
+      filter {
+        extractor {
+          tag 'missing': sourceAttribute("nonexistent.key")
+        }
+        sink {}
+      }
+
+  - name: auto-layer-set
+    layer: auto
+    dsl: |
+      filter {
+        json {}
+        if (sourceAttribute("os.name") == "iOS") {
+          extractor {
+            layer "IOS"
+            service parsed.service as String
+          }
+        }
+        sink {}
+      }
+
+  - name: auto-layer-not-set
+    layer: auto
+    dsl: |
+      filter {
+        json {}
+        extractor {
+          service parsed.service as String
+        }
+        sink {}
+      }
+
+  - name: auto-layer-abort
+    layer: auto
+    dsl: |
+      filter {
+        if (sourceAttribute("os.name") != "iOS") {
+          abort {}
+        }
+        extractor {
+          layer "IOS"
+        }
+        sink {}
+      }
+
+  - name: json-text-fallback
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        extractor {
+          service parsed.service as String
+          tag env: parsed.env as String
+        }
+        sink {}
+      }
+
+  - name: json-text-fallback-invalid
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        extractor {
+          service parsed.service as String
+        }
+        sink {}
+      }
+
+  - name: json-abort-on-failure-false
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {
+          abortOnFailure false
+        }
+        extractor {
+          service parsed.service as String
+        }
+        sink {}
+      }
+
+  - name: json-continue-then-abort
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {
+          abortOnFailure false
+        }
+        abort {}
+        sink {}
+      }
+
+  - name: text-abort-on-failure-false
+    layer: GENERAL
+    dsl: |
+      filter {
+        text {
+          regexp "^(?<level>INFO|WARN|ERROR) (?<msg>.*)$"
+          abortOnFailure false
+        }
+        sink {}
+      }
+
+  # METADATA_TRACE_GETTERS: traceId / traceSegmentId / spanId. Read them out of the
+  # metadata's TraceContext and park them in tags so the assertions can see them.
+  - name: trace-context-read
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        extractor {
+          service parsed.service as String
+          tag 'tid': log.traceContext.traceId
+          tag 'sid': log.traceContext.traceSegmentId
+          tag 'spid': log.traceContext.spanId
+        }
+        sink {}
+      }
+
+  # The write direction. LogBuilder copies traceId / segmentId / spanId from the metadata's
+  # TraceContext only when a rule has NOT set them, so assigning here must win over the
+  # incoming values. segmentId and spanId had no branch in the parser's visitor: the grammar
+  # accepted them, and compiling threw a NullPointerException naming IfStatementContext.
+  - name: trace-write-all-three
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        extractor {
+          service parsed.service as String
+          traceId parsed.tid as String
+          segmentId parsed.seg as String
+          spanId parsed.sp as String
+        }
+        sink {}
+      }
+
+  # segmentId alone — the single-statement shape that used to NPE.
+  - name: trace-segment-override
+    layer: GENERAL
+    dsl: |
+      filter {
+        json {}
+        extractor {
+          service parsed.service as String
+          segmentId parsed.seg as String
+        }
+        sink {}
+      }

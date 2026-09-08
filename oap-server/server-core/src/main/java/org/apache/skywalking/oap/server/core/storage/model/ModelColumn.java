@@ -18,38 +18,70 @@
 
 package org.apache.skywalking.oap.server.core.storage.model;
 
-import com.google.gson.JsonObject;
 import lombok.Getter;
+import lombok.ToString;
 import org.apache.skywalking.oap.server.core.analysis.metrics.DataTable;
 
+import java.lang.reflect.Type;
+
 @Getter
+@ToString
 public class ModelColumn {
     private final ColumnName columnName;
     private final Class<?> type;
-    private final boolean matchQuery;
+    private final Type genericType;
+    /**
+     * Storage this column for query result, but can't be as a condition . Conflict with {@link #indexOnly}
+     */
     private final boolean storageOnly;
+    /**
+     * Index this column for query condition only. Conflict with {@link #storageOnly}
+     *
+     * @since 9.0.0
+     */
+    private final boolean indexOnly;
+    /**
+     * The max length of column value for length sensitive database.
+     */
     private final int length;
+
+    /**
+     * Hold configurations especially for SQL Database, such as MySQL, H2, PostgreSQL
+     *
+     * @since 9.1.0
+     */
+    private final SQLDatabaseExtension sqlDatabaseExtension;
+    /**
+     * Hold configurations especially for ElasticSearch
+     *
+     * @since 9.1.0
+     */
+    private final ElasticSearchExtension elasticSearchExtension;
+    /**
+     * Hold configurations especially for BanyanDB relevant
+     *
+     * @since 9.1.0
+     */
+    private final BanyanDBExtension banyanDBExtension;
 
     public ModelColumn(ColumnName columnName,
                        Class<?> type,
-                       boolean matchQuery,
+                       Type genericType,
                        boolean storageOnly,
+                       boolean indexOnly,
                        boolean isValue,
-                       int length) {
+                       int length,
+                       SQLDatabaseExtension sqlDatabaseExtension,
+                       ElasticSearchExtension elasticSearchExtension,
+                       BanyanDBExtension banyanDBExtension) {
         this.columnName = columnName;
         this.type = type;
-        this.matchQuery = matchQuery;
-
+        this.genericType = genericType;
+        this.length = length;
+        this.sqlDatabaseExtension = sqlDatabaseExtension;
+        this.elasticSearchExtension = elasticSearchExtension;
         /*
-         * Only accept length in the String/JsonObject definition.
-         */
-        if (type.equals(String.class) || type.equals(JsonObject.class)) {
-            this.length = length;
-        } else {
-            this.length = 0;
-        }
-        /*
-         * byte[] and {@link IntKeyLongValueHashMap} could never be query.
+         * byte[] and {@link IntKeyLongValueHashMap} could never be queried.
          */
         if (type.equals(byte[].class) || type.equals(DataTable.class)) {
             this.storageOnly = true;
@@ -60,5 +92,30 @@ public class ModelColumn {
             }
             this.storageOnly = storageOnly;
         }
+
+        if (storageOnly && indexOnly) {
+            throw new IllegalArgumentException(
+                "The column " + columnName + " can't be defined as both indexOnly and storageOnly.");
+        }
+        this.indexOnly = indexOnly;
+        this.banyanDBExtension = banyanDBExtension;
+
+        if (!this.banyanDBExtension.shouldIndex() && this.banyanDBExtension.getAnalyzer() != null) {
+            throw new IllegalArgumentException(
+                "The column " + columnName + " should be indexed if require MatchQuery.");
+        }
+
+        if (!this.banyanDBExtension.shouldIndex() && this.banyanDBExtension.isEnableSort()) {
+            throw new IllegalArgumentException(
+                "The column " + columnName + " should be indexed if require EnableSort.");
+        }
+    }
+
+    /**
+     * Notice, for BanyanDB, should use {@link BanyanDBExtension#shouldIndex()} instead.
+     * @return true means this column should be indexed, as it would be a query condition.
+     */
+    public boolean shouldIndex() {
+        return !storageOnly;
     }
 }

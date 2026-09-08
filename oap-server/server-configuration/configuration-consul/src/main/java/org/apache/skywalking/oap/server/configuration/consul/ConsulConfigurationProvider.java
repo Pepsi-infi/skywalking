@@ -19,24 +19,17 @@
 package org.apache.skywalking.oap.server.configuration.consul;
 
 import com.google.common.base.Strings;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.skywalking.oap.server.configuration.api.AbstractConfigurationProvider;
 import org.apache.skywalking.oap.server.configuration.api.ConfigWatcherRegister;
-import org.apache.skywalking.oap.server.library.module.ModuleConfig;
 import org.apache.skywalking.oap.server.library.module.ModuleStartException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Get configuration from Consul.
  */
+@Slf4j
 public class ConsulConfigurationProvider extends AbstractConfigurationProvider {
-    private static final Logger LOGGER = LoggerFactory.getLogger(ConsulConfigurationProvider.class);
-
-    private final ConsulConfigurationCenterSettings settings;
-
-    public ConsulConfigurationProvider() {
-        this.settings = new ConsulConfigurationCenterSettings();
-    }
+    private ConsulConfigurationCenterSettings settings;
 
     @Override
     public String name() {
@@ -44,13 +37,23 @@ public class ConsulConfigurationProvider extends AbstractConfigurationProvider {
     }
 
     @Override
-    public ModuleConfig createConfigBeanIfAbsent() {
-        return settings;
+    public ConfigCreator newConfigCreator() {
+        return new ConfigCreator<ConsulConfigurationCenterSettings>() {
+            @Override
+            public Class type() {
+                return ConsulConfigurationCenterSettings.class;
+            }
+
+            @Override
+            public void onInitialized(final ConsulConfigurationCenterSettings initialized) {
+                settings = initialized;
+            }
+        };
     }
 
     @Override
     protected ConfigWatcherRegister initConfigReader() throws ModuleStartException {
-        LOGGER.info("consul settings: {}", settings);
+        log.info("consul settings: {}", settings);
 
         if (Strings.isNullOrEmpty(settings.getHostAndPorts())) {
             throw new ModuleStartException("Consul hostAndPorts cannot be null or empty");

@@ -19,23 +19,47 @@
 package org.apache.skywalking.oap.server.core.alarm.provider;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
-import lombok.AccessLevel;
+import java.util.Map;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
+import org.apache.skywalking.oap.server.core.alarm.provider.dingtalk.DingtalkSettings;
+import org.apache.skywalking.oap.server.core.alarm.provider.discord.DiscordSettings;
+import org.apache.skywalking.oap.server.core.alarm.provider.feishu.FeishuSettings;
 import org.apache.skywalking.oap.server.core.alarm.provider.grpc.GRPCAlarmSetting;
+import org.apache.skywalking.oap.server.core.alarm.provider.pagerduty.PagerDutySettings;
+import org.apache.skywalking.oap.server.core.alarm.provider.slack.SlackSettings;
+import org.apache.skywalking.oap.server.core.alarm.provider.webhook.WebhookSettings;
+import org.apache.skywalking.oap.server.core.alarm.provider.wechat.WechatSettings;
+import org.apache.skywalking.oap.server.core.alarm.provider.welink.WeLinkSettings;
 
-@Setter(AccessLevel.PUBLIC)
-@Getter(AccessLevel.PUBLIC)
+@Setter
+@Getter
 @ToString
 public class Rules {
     private List<AlarmRule> rules;
-    private List<String> webhooks;
-    private GRPCAlarmSetting grpchookSetting;
+    private Map<String, WebhookSettings> webhookSettingsMap;
+    private Map<String, GRPCAlarmSetting> grpcAlarmSettingMap;
+    private Map<String, SlackSettings> slackSettingsMap;
+    private Map<String, WechatSettings> wechatSettingsMap;
+    private Map<String, DingtalkSettings> dingtalkSettingsMap;
+    private Map<String, FeishuSettings> feishuSettingsMap;
+    private Map<String, WeLinkSettings> weLinkSettingsMap;
+    private Map<String, PagerDutySettings> pagerDutySettingsMap;
+    private Map<String, DiscordSettings> discordSettingsMap;
 
     public Rules() {
         this.rules = new ArrayList<>();
-        this.webhooks = new ArrayList<>();
+        this.webhookSettingsMap = new HashMap<>();
+        this.grpcAlarmSettingMap = new HashMap<>();
+        this.slackSettingsMap = new HashMap<>();
+        this.wechatSettingsMap = new HashMap<>();
+        this.dingtalkSettingsMap = new HashMap<>();
+        this.feishuSettingsMap = new HashMap<>();
+        this.weLinkSettingsMap = new HashMap<>();
+        this.pagerDutySettingsMap = new HashMap<>();
+        this.discordSettingsMap = new HashMap<>();
     }
 }

@@ -20,6 +20,7 @@ package org.apache.skywalking.oap.server.library.module;
 
 import java.util.HashMap;
 import java.util.Map;
+import lombok.AccessLevel;
 import lombok.Setter;
 
 /**
@@ -30,8 +31,10 @@ import lombok.Setter;
 public abstract class ModuleProvider implements ModuleServiceHolder {
     @Setter
     private ModuleManager manager;
-    @Setter
+    @Setter(AccessLevel.PUBLIC)
     private ModuleDefine moduleDefine;
+    @Setter(AccessLevel.PUBLIC)
+    private TerminalFriendlyTable bootingParameters;
     private final Map<Class<? extends Service>, Service> services = new HashMap<>();
 
     public ModuleProvider() {
@@ -52,9 +55,28 @@ public abstract class ModuleProvider implements ModuleServiceHolder {
     public abstract Class<? extends ModuleDefine> module();
 
     /**
-     *
+     * Create a config creator to initialize this configuration of this module provider
+     * @return creator instance to initialize the configuration with callback. Or return null if no config is required.
      */
-    public abstract ModuleConfig createConfigBeanIfAbsent();
+    public abstract ConfigCreator<? extends ModuleConfig> newConfigCreator();
+
+    /**
+     * Configuration creator to provide Module Config to initialize
+     * @param <T> class type of the config
+     */
+    public interface ConfigCreator<T extends ModuleConfig> {
+        /**
+         * Declare the type of the config class
+         * @return class type
+         */
+        Class<T> type();
+
+        /**
+         * Callback when the ModuleManager kernel has initialized this configuration.
+         * @param initialized instance of the given {@link #type()}
+         */
+        void onInitialized(T initialized);
+    }
 
     /**
      * In prepare stage, the moduleDefine should initialize things which are irrelative other modules.
@@ -121,11 +143,19 @@ public abstract class ModuleProvider implements ModuleServiceHolder {
         throw new ServiceNotProvidedException("Service " + serviceType.getName() + " should not be provided, based on moduleDefine define.");
     }
 
-    ModuleDefine getModule() {
+    public ModuleDefine getModule() {
         return moduleDefine;
     }
 
     String getModuleName() {
         return moduleDefine.name();
+    }
+
+    protected void setBootingParameter(String name, String value) {
+        bootingParameters.addRow(new TerminalFriendlyTable.Row(name, value));
+    }
+
+    protected void setBootingParameter(String name, long value) {
+        bootingParameters.addRow(new TerminalFriendlyTable.Row(name, String.valueOf(value)));
     }
 }

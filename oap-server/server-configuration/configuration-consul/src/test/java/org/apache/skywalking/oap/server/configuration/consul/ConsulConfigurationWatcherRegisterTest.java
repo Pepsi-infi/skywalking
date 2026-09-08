@@ -21,36 +21,33 @@ package org.apache.skywalking.oap.server.configuration.consul;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Sets;
 import com.google.common.io.BaseEncoding;
-import com.orbitz.consul.KeyValueClient;
-import com.orbitz.consul.cache.ConsulCache;
-import com.orbitz.consul.cache.KVCache;
-import com.orbitz.consul.model.kv.ImmutableValue;
+import org.kiwiproject.consul.cache.ConsulCache;
+import org.kiwiproject.consul.cache.KVCache;
+import org.kiwiproject.consul.model.kv.ImmutableValue;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.MockedStatic;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.lang.reflect.Field;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.mockito.ArgumentCaptor;
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.powermock.api.mockito.PowerMockito;
-import org.powermock.core.classloader.annotations.PrepareForTest;
-import org.powermock.modules.junit4.PowerMockRunner;
-import org.powermock.reflect.Whitebox;
 
-import static org.junit.Assert.assertEquals;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.eq;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-@RunWith(PowerMockRunner.class)
-@PrepareForTest(KVCache.class)
+@ExtendWith(MockitoExtension.class)
 @SuppressWarnings({
-    "unchecked",
-    "OptionalGetWithoutIsPresent"
+        "unchecked",
+        "OptionalGetWithoutIsPresent"
 })
 public class ConsulConfigurationWatcherRegisterTest {
     @Mock
@@ -58,17 +55,16 @@ public class ConsulConfigurationWatcherRegisterTest {
     private ConcurrentHashMap<String, KVCache> cacheByKey;
     private ConcurrentHashMap<String, Optional<String>> configItemKeyedByName;
 
-    @Before
-    public void setUp() {
-        MockitoAnnotations.initMocks(this);
-    }
-
     @Test
-    public void shouldUpdateCachesWhenNotified() {
+    public void shouldUpdateCachesWhenNotified() throws Exception {
         cacheByKey = new ConcurrentHashMap<>();
         configItemKeyedByName = new ConcurrentHashMap<>();
-        Whitebox.setInternalState(register, "cachesByKey", cacheByKey);
-        Whitebox.setInternalState(register, "configItemKeyedByName", configItemKeyedByName);
+        Field cachesField = ConsulConfigurationWatcherRegister.class.getDeclaredField("cachesByKey");
+        cachesField.setAccessible(true);
+        cachesField.set(register, cacheByKey);
+        Field itemsField = ConsulConfigurationWatcherRegister.class.getDeclaredField("configItemKeyedByName");
+        itemsField.setAccessible(true);
+        itemsField.set(register, configItemKeyedByName);
 
         KVCache cache1 = mock(KVCache.class);
         KVCache cache2 = mock(KVCache.class);
@@ -76,50 +72,55 @@ public class ConsulConfigurationWatcherRegisterTest {
         ArgumentCaptor<ConsulCache.Listener> listener1 = ArgumentCaptor.forClass(ConsulCache.Listener.class);
         ArgumentCaptor<ConsulCache.Listener> listener2 = ArgumentCaptor.forClass(ConsulCache.Listener.class);
 
-        PowerMockito.mockStatic(KVCache.class);
-        PowerMockito.when(KVCache.newCache(any(KeyValueClient.class), eq("key1"))).thenReturn(cache1);
-        PowerMockito.when(KVCache.newCache(any(KeyValueClient.class), eq("key2"))).thenReturn(cache2);
+        try (MockedStatic<KVCache> kvCacheMockedStatic = mockStatic(KVCache.class)) {
+            kvCacheMockedStatic.when(() -> KVCache.newCache(any(), eq("key1"))).thenReturn(cache1);
+            kvCacheMockedStatic.when(() -> KVCache.newCache(any(), eq("key2"))).thenReturn(cache2);
 
-        when(register.readConfig(any(Set.class))).thenCallRealMethod();
+            when(register.readConfig(any(Set.class))).thenCallRealMethod();
 
-        register.readConfig(Sets.newHashSet("key1", "key2"));
+            register.readConfig(Sets.newHashSet("key1", "key2"));
 
-        verify(cache1).addListener(listener1.capture());
-        verify(cache2).addListener(listener2.capture());
+            verify(cache1).addListener(listener1.capture());
+            verify(cache2).addListener(listener2.capture());
 
-        listener1.getValue()
-                 .notify(ImmutableMap.of("key1", ImmutableValue.builder()
-                                                               .createIndex(0)
-                                                               .modifyIndex(0)
-                                                               .lockIndex(0)
-                                                               .key("key1")
-                                                               .flags(0)
-                                                               .value(BaseEncoding.base64().encode("val1".getBytes()))
-                                                               .build()));
-        listener2.getValue()
-                 .notify(ImmutableMap.of("key2", ImmutableValue.builder()
-                                                               .createIndex(0)
-                                                               .modifyIndex(0)
-                                                               .lockIndex(0)
-                                                               .key("key2")
-                                                               .flags(0)
-                                                               .value(BaseEncoding.base64().encode("val2".getBytes()))
-                                                               .build()));
+            listener1.getValue()
+                    .notify(ImmutableMap.of("key1", ImmutableValue.builder()
+                            .createIndex(0)
+                            .modifyIndex(0)
+                            .lockIndex(0)
+                            .key("key1")
+                            .flags(0)
+                            .value(BaseEncoding.base64().encode("val1".getBytes()))
+                            .build()));
+            listener2.getValue()
+                    .notify(ImmutableMap.of("key2", ImmutableValue.builder()
+                            .createIndex(0)
+                            .modifyIndex(0)
+                            .lockIndex(0)
+                            .key("key2")
+                            .flags(0)
+                            .value(BaseEncoding.base64().encode("val2".getBytes()))
+                            .build()));
 
-        assertEquals(2, configItemKeyedByName.size());
-        assertEquals("val1", configItemKeyedByName.get("key1").get());
-        assertEquals("val2", configItemKeyedByName.get("key2").get());
+            assertEquals(2, configItemKeyedByName.size());
+            assertEquals("val1", configItemKeyedByName.get("key1").get());
+            assertEquals("val2", configItemKeyedByName.get("key2").get());
+        }
     }
 
     @Test
-    public void shouldUnsubscribeWhenKeyRemoved() {
+    public void shouldUnsubscribeWhenKeyRemoved() throws Exception {
         cacheByKey = new ConcurrentHashMap<>();
         KVCache existedCache = mock(KVCache.class);
         cacheByKey.put("existedKey", existedCache);
 
         configItemKeyedByName = new ConcurrentHashMap<>();
-        Whitebox.setInternalState(register, "cachesByKey", cacheByKey);
-        Whitebox.setInternalState(register, "configItemKeyedByName", configItemKeyedByName);
+        Field cachesField = ConsulConfigurationWatcherRegister.class.getDeclaredField("cachesByKey");
+        cachesField.setAccessible(true);
+        cachesField.set(register, cacheByKey);
+        Field itemsField = ConsulConfigurationWatcherRegister.class.getDeclaredField("configItemKeyedByName");
+        itemsField.setAccessible(true);
+        itemsField.set(register, configItemKeyedByName);
 
         KVCache cache1 = mock(KVCache.class);
         KVCache cache2 = mock(KVCache.class);
@@ -127,16 +128,17 @@ public class ConsulConfigurationWatcherRegisterTest {
         ArgumentCaptor<ConsulCache.Listener> listener1 = ArgumentCaptor.forClass(ConsulCache.Listener.class);
         ArgumentCaptor<ConsulCache.Listener> listener2 = ArgumentCaptor.forClass(ConsulCache.Listener.class);
 
-        PowerMockito.mockStatic(KVCache.class);
-        PowerMockito.when(KVCache.newCache(any(KeyValueClient.class), eq("key1"))).thenReturn(cache1);
-        PowerMockito.when(KVCache.newCache(any(KeyValueClient.class), eq("key2"))).thenReturn(cache2);
+        try (MockedStatic<KVCache> kvCacheMockedStatic = mockStatic(KVCache.class)) {
+            kvCacheMockedStatic.when(() -> KVCache.newCache(any(), eq("key1"))).thenReturn(cache1);
+            kvCacheMockedStatic.when(() -> KVCache.newCache(any(), eq("key2"))).thenReturn(cache2);
 
-        when(register.readConfig(any(Set.class))).thenCallRealMethod();
+            when(register.readConfig(any(Set.class))).thenCallRealMethod();
 
-        register.readConfig(Sets.newHashSet("key1", "key2"));
+            register.readConfig(Sets.newHashSet("key1", "key2"));
 
-        verify(cache1).addListener(listener1.capture());
-        verify(cache2).addListener(listener2.capture());
-        verify(existedCache).stop();
+            verify(cache1).addListener(listener1.capture());
+            verify(cache2).addListener(listener2.capture());
+            verify(existedCache).stop();
+        }
     }
 }

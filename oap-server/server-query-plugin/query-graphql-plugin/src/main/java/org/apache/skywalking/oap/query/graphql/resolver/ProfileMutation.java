@@ -18,11 +18,11 @@
 
 package org.apache.skywalking.oap.query.graphql.resolver;
 
-import com.coxautodev.graphql.tools.GraphQLMutationResolver;
+import graphql.kickstart.tools.GraphQLMutationResolver;
 import java.io.IOException;
 import org.apache.skywalking.oap.server.core.query.input.ProfileTaskCreationRequest;
 import org.apache.skywalking.oap.server.core.CoreModule;
-import org.apache.skywalking.oap.server.core.profile.ProfileTaskMutationService;
+import org.apache.skywalking.oap.server.core.profiling.trace.ProfileTaskMutationService;
 import org.apache.skywalking.oap.server.core.query.type.ProfileTaskCreationResult;
 import org.apache.skywalking.oap.server.library.module.ModuleManager;
 

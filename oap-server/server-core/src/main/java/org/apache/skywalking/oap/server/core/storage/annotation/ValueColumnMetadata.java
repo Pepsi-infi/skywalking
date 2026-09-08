@@ -23,7 +23,7 @@ import java.util.Map;
 import java.util.Optional;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
-import org.apache.skywalking.oap.server.core.query.sql.Function;
+import org.apache.skywalking.oap.server.core.query.enumeration.Scope;
 
 /**
  * ValueColumnMetadata holds the metadata for column values of metrics. The metadata of ValueColumn is declared through
@@ -32,7 +32,8 @@ import org.apache.skywalking.oap.server.core.query.sql.Function;
 public enum ValueColumnMetadata {
     INSTANCE;
 
-    private Map<String, ValueColumn> mapping = new HashMap<>();
+    private final Map<String, ValueColumn> mapping = new HashMap<>();
+    private final HashMap<String, String> columnNameOverrideRule = new HashMap<>();
 
     /**
      * Register the new metadata for the given model name.
@@ -40,35 +41,91 @@ public enum ValueColumnMetadata {
     public void putIfAbsent(String modelName,
                             String valueCName,
                             Column.ValueDataType dataType,
-                            Function function,
-                            int defaultValue) {
-        mapping.putIfAbsent(modelName, new ValueColumn(valueCName, dataType, function, defaultValue));
+                            int defaultValue,
+                            int scopeId) {
+        this.putIfAbsent(modelName, valueCName, dataType, defaultValue, scopeId, false);
+    }
+
+    public void putIfAbsent(String modelName,
+                            String valueCName,
+                            Column.ValueDataType dataType,
+                            int defaultValue,
+                            int scopeId,
+                            boolean multiIntValues) {
+        mapping.putIfAbsent(modelName, new ValueColumn(valueCName, dataType, defaultValue, scopeId, multiIntValues));
+    }
+
+    public void overrideColumnName(String oldName, String newName) {
+        columnNameOverrideRule.put(oldName, newName);
+    }
+
+    /**
+     * Drop the metadata entry for the given model name. Used by the runtime-rule
+     * teardown path so a subsequent re-register under a different scope (e.g. a
+     * SHAPE-BREAK from SERVICE → SERVICE_INSTANCE) is not silently ignored by
+     * {@link #putIfAbsent}. No-op when the entry is absent.
+     */
+    public void remove(String modelName) {
+        mapping.remove(modelName);
     }
 
     /**
      * Fetch the value column name of the given metrics name.
      */
     public String getValueCName(String metricsName) {
-        return findColumn(metricsName).valueCName;
-    }
-
-    /**
-     * Fetch the function for the value column of the given metrics name.
-     */
-    public Function getValueFunction(String metricsName) {
-        return findColumn(metricsName).function;
+        final String valueCName = findColumn(metricsName).valueCName;
+        return columnNameOverrideRule.getOrDefault(valueCName, valueCName);
     }
 
     public int getDefaultValue(String metricsName) {
         return findColumn(metricsName).defaultValue;
     }
 
+    /**
+     * @return metric metadata if found
+     */
     public Optional<ValueColumn> readValueColumnDefinition(String metricsName) {
-        return Optional.ofNullable(mapping.get(metricsName));
+        return Optional.ofNullable(resolve(metricsName));
+    }
+
+    /**
+     * Resolve a metric's value column: the locally-registered catalog wins; only when a metric is
+     * absent locally does the request-scoped {@link InspectQueryContext} fill the gap (the admin
+     * inspect value path). The overlay is therefore provide-if-absent — it can never shadow or
+     * override a registered metric. Returns {@code null} when neither has it.
+     *
+     * @param metricsName the metric to resolve
+     * @return its value column, or {@code null}
+     */
+    private ValueColumn resolve(String metricsName) {
+        final ValueColumn registered = mapping.get(metricsName);
+        if (registered != null) {
+            return registered;
+        }
+        final ForeignMetricMeta foreign = InspectQueryContext.get(metricsName);
+        return foreign == null ? null : toForeignValueColumn(foreign);
+    }
+
+    private ValueColumn toForeignValueColumn(ForeignMetricMeta foreign) {
+        final Column.ValueDataType dataType = "LABELED".equals(foreign.getValueType())
+            ? Column.ValueDataType.LABELED_VALUE : Column.ValueDataType.COMMON_VALUE;
+        return new ValueColumn(
+            foreign.getValueColumn(), dataType, foreign.getDefaultValue(), foreign.getScopeId(), false);
+    }
+
+    /**
+     * @return all metrics metadata.
+     */
+    public Map<String, ValueColumn> getAllMetadata() {
+        return mapping;
+    }
+
+    public Scope getScope(String metricsName) {
+        return Scope.Finder.valueOf(findColumn(metricsName).scopeId);
     }
 
     private ValueColumn findColumn(String metricsName) {
-        ValueColumn column = mapping.get(metricsName);
+        ValueColumn column = resolve(metricsName);
         if (column == null) {
             throw new RuntimeException("Metrics:" + metricsName + " doesn't have value column definition");
         }
@@ -77,10 +134,13 @@ public enum ValueColumnMetadata {
 
     @Getter
     @RequiredArgsConstructor
-    public class ValueColumn {
+    public static class ValueColumn {
         private final String valueCName;
         private final Column.ValueDataType dataType;
-        private final Function function;
         private final int defaultValue;
+        private final int scopeId;
+        // Will remove this field when `MultiIntValuesHolder` is removed in the future.
+        @Deprecated
+        private final boolean multiIntValues;
     }
 }

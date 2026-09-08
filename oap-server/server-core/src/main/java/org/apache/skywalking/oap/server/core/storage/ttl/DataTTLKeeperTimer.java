@@ -18,12 +18,7 @@
 
 package org.apache.skywalking.oap.server.core.storage.ttl;
 
-import java.io.IOException;
-import java.util.List;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.skywalking.apm.util.RunnableWithExceptionProtection;
 import org.apache.skywalking.oap.server.core.CoreModule;
 import org.apache.skywalking.oap.server.core.CoreModuleConfig;
 import org.apache.skywalking.oap.server.core.analysis.metrics.Metrics;
@@ -33,9 +28,17 @@ import org.apache.skywalking.oap.server.core.cluster.RemoteInstance;
 import org.apache.skywalking.oap.server.core.storage.IHistoryDeleteDAO;
 import org.apache.skywalking.oap.server.core.storage.StorageModule;
 import org.apache.skywalking.oap.server.core.storage.model.IModelManager;
+import org.apache.skywalking.oap.server.library.util.VirtualThreads;
 import org.apache.skywalking.oap.server.core.storage.model.Model;
 import org.apache.skywalking.oap.server.library.module.ModuleManager;
 import org.apache.skywalking.oap.server.library.util.CollectionUtils;
+import org.apache.skywalking.oap.server.library.util.RunnableWithExceptionProtection;
+
+import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * TTL = Time To Live
@@ -58,13 +61,19 @@ public enum DataTTLKeeperTimer {
         this.clusterNodesQuery = moduleManager.find(ClusterModule.NAME).provider().getService(ClusterNodesQuery.class);
         this.moduleConfig = moduleConfig;
 
-        Executors.newSingleThreadScheduledExecutor()
-                 .scheduleAtFixedRate(
-                     new RunnableWithExceptionProtection(
-                         this::delete,
-                         t -> log.error("Remove data in background failure.", t)
-                     ), moduleConfig
-                         .getDataKeeperExecutePeriod(), moduleConfig.getDataKeeperExecutePeriod(), TimeUnit.MINUTES);
+        VirtualThreads.createScheduledExecutor(
+                          "DataTTLKeeper",
+                          () -> Executors.newSingleThreadScheduledExecutor(r -> {
+                              final Thread t = new Thread(r, "DataTTLKeeper");
+                              t.setDaemon(true);
+                              return t;
+                          }))
+                      .scheduleAtFixedRate(
+                          new RunnableWithExceptionProtection(
+                              this::delete,
+                              t -> log.error("Remove data in background failure.", t)
+                          ), moduleConfig
+                              .getDataKeeperExecutePeriod(), moduleConfig.getDataKeeperExecutePeriod(), TimeUnit.MINUTES);
     }
 
     /**
@@ -72,20 +81,37 @@ public enum DataTTLKeeperTimer {
      * node list from {@link ClusterNodesQuery}.
      */
     private void delete() {
+        IModelManager modelGetter = moduleManager.find(CoreModule.NAME).provider().getService(IModelManager.class);
+        List<Model> models = modelGetter.allModels();
+
         List<RemoteInstance> remoteInstances = clusterNodesQuery.queryRemoteNodes();
+        // Sort the instances as same as RemoteClientManager#refresh did.
+        Collections.sort(remoteInstances);
         if (CollectionUtils.isNotEmpty(remoteInstances) && !remoteInstances.get(0).getAddress().isSelf()) {
-            log.info("The selected first getAddress is {}. Skip.", remoteInstances.get(0).toString());
+            log.info(
+                "The selected first getAddress is {}. The remove stage is skipped.",
+                remoteInstances.get(0).toString()
+            );
             return;
         }
 
         log.info("Beginning to remove expired metrics from the storage.");
-        IModelManager modelGetter = moduleManager.find(CoreModule.NAME).provider().getService(IModelManager.class);
-        List<Model> models = modelGetter.allModels();
         models.forEach(this::execute);
     }
 
     private void execute(Model model) {
         try {
+            if (!model.isTimeSeries()) {
+                return;
+            }
+            if (log.isDebugEnabled()) {
+                log.debug(
+                    "Model {}, is record? {}. RecordDataTTL {}, MetricsDataTTL {}",
+                    model.getName(),
+                    model.isRecord(),
+                    moduleConfig.getRecordDataTTL(),
+                    moduleConfig.getMetricsDataTTL());
+            }
             moduleManager.find(StorageModule.NAME)
                          .provider()
                          .getService(IHistoryDeleteDAO.class)

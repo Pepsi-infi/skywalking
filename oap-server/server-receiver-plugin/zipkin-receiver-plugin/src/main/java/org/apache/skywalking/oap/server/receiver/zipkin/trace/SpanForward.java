@@ -18,67 +18,255 @@
 
 package org.apache.skywalking.oap.server.receiver.zipkin.trace;
 
-import java.util.List;
-import org.apache.skywalking.apm.util.StringUtil;
-import org.apache.skywalking.oap.server.core.analysis.IDManager;
+import com.google.common.util.concurrent.RateLimiter;
+import com.google.gson.JsonObject;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.skywalking.oap.server.core.Const;
+import org.apache.skywalking.oap.server.core.CoreModule;
 import org.apache.skywalking.oap.server.core.analysis.TimeBucket;
-import org.apache.skywalking.oap.server.core.analysis.NodeType;
+import org.apache.skywalking.oap.server.core.analysis.manual.searchtag.Tag;
+import org.apache.skywalking.oap.server.core.analysis.manual.searchtag.TagType;
+import org.apache.skywalking.oap.server.core.config.NamingControl;
+import org.apache.skywalking.oap.server.core.trace.SpanListenerManager;
+import org.apache.skywalking.oap.server.core.trace.SpanListenerResult;
 import org.apache.skywalking.oap.server.core.source.SourceReceiver;
-import org.apache.skywalking.oap.server.library.util.BooleanUtils;
+import org.apache.skywalking.oap.server.core.source.TagAutocomplete;
+import org.apache.skywalking.oap.server.core.zipkin.ZipkinSpanRecord;
+import org.apache.skywalking.oap.server.core.zipkin.source.ZipkinService;
+import org.apache.skywalking.oap.server.core.zipkin.source.ZipkinServiceRelation;
+import org.apache.skywalking.oap.server.core.zipkin.source.ZipkinServiceSpan;
+import org.apache.skywalking.oap.server.core.zipkin.source.ZipkinSpan;
+import org.apache.skywalking.oap.server.library.module.ModuleManager;
+import org.apache.skywalking.oap.server.library.util.CollectionUtils;
+import org.apache.skywalking.oap.server.library.util.StringUtil;
+import org.apache.skywalking.oap.server.receiver.zipkin.SpanForwardService;
 import org.apache.skywalking.oap.server.receiver.zipkin.ZipkinReceiverConfig;
-import org.apache.skywalking.oap.server.receiver.zipkin.handler.SpanEncode;
-import org.apache.skywalking.oap.server.storage.plugin.zipkin.ZipkinSpan;
+import zipkin2.Annotation;
 import zipkin2.Span;
-import zipkin2.codec.SpanBytesEncoder;
+import zipkin2.internal.HexCodec;
 
-public class SpanForward {
-    private ZipkinReceiverConfig config;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+@Slf4j
+public class SpanForward implements SpanForwardService {
+
+    private final ZipkinReceiverConfig config;
+    private final ModuleManager moduleManager;
+    private final List<String> searchTagKeys;
+    private final long samplerBoundary;
+    private NamingControl namingControl;
     private SourceReceiver receiver;
+    private RateLimiter rateLimiter;
+    private SpanListenerManager spanListenerManager;
 
-    public SpanForward(ZipkinReceiverConfig config, SourceReceiver receiver) {
+    public SpanForward(final ZipkinReceiverConfig config, final ModuleManager manager) {
         this.config = config;
-        this.receiver = receiver;
+        this.moduleManager = manager;
+        this.searchTagKeys = Arrays.asList(config.getSearchableTracesTags().split(Const.COMMA));
+        float sampleRate = (float) config.getSampleRate() / 10000;
+        samplerBoundary = (long) (Long.MAX_VALUE * sampleRate);
+        if (config.getMaxSpansPerSecond() > 0) {
+            this.rateLimiter = RateLimiter.create(config.getMaxSpansPerSecond());
+        }
     }
 
-    public void send(List<Span> spanList) {
-        spanList.forEach(span -> {
+    public List<Span> send(List<Span> spanList) {
+        if (CollectionUtils.isEmpty(spanList)) {
+            return Collections.emptyList();
+        }
+        final var sampledTraces = getSampledTraces(spanList);
+        sampledTraces.forEach(span -> {
             ZipkinSpan zipkinSpan = new ZipkinSpan();
-            zipkinSpan.setTraceId(span.traceId());
-            zipkinSpan.setSpanId(span.id());
             String serviceName = span.localServiceName();
             if (StringUtil.isEmpty(serviceName)) {
                 serviceName = "Unknown";
             }
-            zipkinSpan.setServiceId(IDManager.ServiceID.buildId(serviceName, NodeType.Normal));
+            zipkinSpan.setSpanId(span.id());
+            zipkinSpan.setTraceId(span.traceId());
+            zipkinSpan.setSpanId(span.id());
+            zipkinSpan.setParentId(span.parentId());
+            zipkinSpan.setName(getNamingControl().formatEndpointName(serviceName, span.name()));
+            zipkinSpan.setDuration(span.duration() == null ? 0 : span.duration());
+            if (span.kind() != null) {
+                zipkinSpan.setKind(span.kind().name());
+            }
+            zipkinSpan.setLocalEndpointServiceName(getNamingControl().formatServiceName(serviceName));
+            if (span.localEndpoint() != null) {
+                zipkinSpan.setLocalEndpointIPV4(span.localEndpoint().ipv4());
+                zipkinSpan.setLocalEndpointIPV6(span.localEndpoint().ipv6());
+                Integer localPort = span.localEndpoint().port();
+                if (localPort != null) {
+                    zipkinSpan.setLocalEndpointPort(localPort);
+                }
+            }
+            if (span.remoteEndpoint() != null) {
+                zipkinSpan.setRemoteEndpointServiceName(getNamingControl().formatServiceName(span.remoteServiceName()));
+                zipkinSpan.setRemoteEndpointIPV4(span.remoteEndpoint().ipv4());
+                zipkinSpan.setRemoteEndpointIPV6(span.remoteEndpoint().ipv6());
+                Integer remotePort = span.remoteEndpoint().port();
+                if (remotePort != null) {
+                    zipkinSpan.setRemoteEndpointPort(remotePort);
+                }
+            }
+            zipkinSpan.setTimestamp(span.timestampAsLong());
+            zipkinSpan.setDebug(span.debug());
+            zipkinSpan.setShared(span.shared());
 
-            String spanName = span.name();
-            Span.Kind kind = span.kind();
-            switch (kind) {
-                case SERVER:
-                case CONSUMER:
-                    if (!StringUtil.isEmpty(spanName)) {
-                        zipkinSpan.setEndpointId(IDManager.EndpointID.buildId(zipkinSpan.getServiceId(), span.name()));
+            long timestampMillis = span.timestampAsLong() / 1000;
+            zipkinSpan.setTimestampMillis(timestampMillis);
+            long timeBucket = TimeBucket.getRecordTimeBucket(timestampMillis);
+            zipkinSpan.setTimeBucket(timeBucket);
+
+            long minuteTimeBucket = TimeBucket.getMinuteTimeBucket(timestampMillis);
+
+            if (!span.tags().isEmpty() || !span.annotations().isEmpty()) {
+                List<String> query = zipkinSpan.getQuery();
+                JsonObject annotationsJson = new JsonObject();
+                JsonObject tagsJson = new JsonObject();
+                for (Annotation annotation : span.annotations()) {
+                    annotationsJson.addProperty(Long.toString(annotation.timestamp()), annotation.value());
+                    if (annotation.value().length() > ZipkinSpanRecord.QUERY_LENGTH) {
+                        if (log.isDebugEnabled()) {
+                            log.debug("Span annotation : {}  length > : {}, dropped", annotation.value(), ZipkinSpanRecord.QUERY_LENGTH);
+                        }
+                        continue;
                     }
-            }
-            if (!StringUtil.isEmpty(spanName)) {
-                zipkinSpan.setEndpointName(spanName);
-            }
-            long startTime = span.timestampAsLong() / 1000;
-            zipkinSpan.setStartTime(startTime);
-            if (startTime != 0) {
-                long timeBucket = TimeBucket.getRecordTimeBucket(zipkinSpan.getStartTime());
-                zipkinSpan.setTimeBucket(timeBucket);
+                    query.add(annotation.value());
+                }
+                zipkinSpan.setAnnotations(annotationsJson);
+                for (Map.Entry<String, String> tag : span.tags().entrySet()) {
+                    String tagString = tag.getKey() + "=" + tag.getValue();
+                    tagsJson.addProperty(tag.getKey(), tag.getValue());
+                    if (tag.getValue().length() > Tag.TAG_LENGTH || tagString.length() > Tag.TAG_LENGTH) {
+                        if (log.isDebugEnabled()) {
+                            log.debug("Span tag : {} length > : {}, dropped", tagString, Tag.TAG_LENGTH);
+                        }
+                        continue;
+                    }
+                    query.add(tag.getKey());
+                    query.add(tagString);
+
+                    if (searchTagKeys.contains(tag.getKey())) {
+                        addAutocompleteTags(minuteTimeBucket, tag.getKey(), tag.getValue());
+                    }
+                }
+                zipkinSpan.setTags(tagsJson);
             }
 
-            long latency = span.durationAsLong() / 1000;
+            // Phase 2: notify span listeners with the Zipkin span
+            final SpanListenerResult listenerResult = getSpanListenerManager()
+                .notifyZipkinPhase(zipkinSpan);
 
-            zipkinSpan.setEndTime(startTime + latency);
-            zipkinSpan.setIsError(BooleanUtils.booleanToValue(false));
-            zipkinSpan.setEncode(SpanEncode.PROTO3);
-            zipkinSpan.setLatency((int) latency);
-            zipkinSpan.setDataBinary(SpanBytesEncoder.PROTO3.encode(span));
+            // Merge additional tags from listeners into span tags
+            if (!listenerResult.getAdditionalTags().isEmpty()) {
+                JsonObject tags = zipkinSpan.getTags();
+                if (tags == null) {
+                    tags = new JsonObject();
+                }
+                for (final Map.Entry<String, String> entry : listenerResult.getAdditionalTags().entrySet()) {
+                    tags.addProperty(entry.getKey(), entry.getValue());
+                }
+                zipkinSpan.setTags(tags);
+            }
 
-            receiver.receive(zipkinSpan);
+            getReceiver().receive(zipkinSpan);
+
+            toService(zipkinSpan, minuteTimeBucket);
+            toServiceSpan(zipkinSpan, minuteTimeBucket);
+            if (!StringUtil.isEmpty(zipkinSpan.getRemoteEndpointServiceName())) {
+                toServiceRelation(zipkinSpan, minuteTimeBucket);
+            }
         });
+        return sampledTraces;
+    }
+
+    private void addAutocompleteTags(final long minuteTimeBucket, final String key, final String value) {
+        TagAutocomplete tagAutocomplete = new TagAutocomplete();
+        tagAutocomplete.setTagKey(key);
+        tagAutocomplete.setTagValue(value);
+        tagAutocomplete.setTagType(TagType.ZIPKIN);
+        tagAutocomplete.setTimeBucket(minuteTimeBucket);
+        getReceiver().receive(tagAutocomplete);
+    }
+
+    private void toService(ZipkinSpan zipkinSpan, final long minuteTimeBucket) {
+        ZipkinService service = new ZipkinService();
+        service.setServiceName(zipkinSpan.getLocalEndpointServiceName());
+        service.setTimeBucket(minuteTimeBucket);
+        getReceiver().receive(service);
+    }
+
+    private void toServiceSpan(ZipkinSpan zipkinSpan, final long minuteTimeBucket) {
+        ZipkinServiceSpan serviceSpan = new ZipkinServiceSpan();
+        serviceSpan.setServiceName(zipkinSpan.getLocalEndpointServiceName());
+        serviceSpan.setSpanName(zipkinSpan.getName());
+        serviceSpan.setTimeBucket(minuteTimeBucket);
+        getReceiver().receive(serviceSpan);
+    }
+
+    private void toServiceRelation(ZipkinSpan zipkinSpan, final long minuteTimeBucket) {
+        ZipkinServiceRelation relation = new ZipkinServiceRelation();
+        relation.setServiceName(zipkinSpan.getLocalEndpointServiceName());
+        relation.setRemoteServiceName(zipkinSpan.getRemoteEndpointServiceName());
+        relation.setTimeBucket(minuteTimeBucket);
+        getReceiver().receive(relation);
+    }
+
+    private List<Span> getSampledTraces(List<Span> input) {
+        // 100% sampleRate and no rateLimiter, return all spans
+        if (config.getSampleRate() == 10000 && rateLimiter == null) {
+            return input;
+        }
+        List<Span> sampledTraces = new ArrayList<>(input.size());
+        for (Span span : input) {
+            if (Boolean.TRUE.equals(span.debug())) {
+                sampledTraces.add(span);
+                continue;
+            }
+
+            // Apply maximum spans per minute sampling first
+            if (rateLimiter != null && !rateLimiter.tryAcquire()) {
+                log.debug("Span dropped due to maximum spans per minute limit: {}", span.id());
+                continue;
+            }
+
+            // Apply percentage-based sampling
+            if (config.getSampleRate() == 10000) {
+                // 100% sample rate - include all spans that passed the maximum spans check
+                sampledTraces.add(span);
+            } else {
+                long traceId = HexCodec.lowerHexToUnsignedLong(span.traceId());
+                traceId = traceId == Long.MIN_VALUE ? Long.MAX_VALUE : Math.abs(traceId);
+                if (traceId <= samplerBoundary) {
+                    sampledTraces.add(span);
+                }
+            }
+        }
+        return sampledTraces;
+    }
+
+    private NamingControl getNamingControl() {
+        if (namingControl == null) {
+            namingControl = moduleManager.find(CoreModule.NAME).provider().getService(NamingControl.class);
+        }
+        return namingControl;
+    }
+
+    private SourceReceiver getReceiver() {
+        if (receiver == null) {
+            receiver = moduleManager.find(CoreModule.NAME).provider().getService(SourceReceiver.class);
+        }
+        return receiver;
+    }
+
+    private SpanListenerManager getSpanListenerManager() {
+        if (spanListenerManager == null) {
+            spanListenerManager = moduleManager.find(CoreModule.NAME).provider().getService(SpanListenerManager.class);
+        }
+        return spanListenerManager;
     }
 }

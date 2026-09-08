@@ -38,6 +38,15 @@ public class DefaultScopeDefine {
      * <p>
      * If you want to extend the scope, recommend to start with 10,000.
      */
+
+    /**
+     * @since 9.0.0
+     */
+    public static final int UNKNOWN = 0;
+    /**
+     * @since Deprecated from 9.0.0
+     */
+    @Deprecated
     public static final int ALL = 0;
     public static final int SERVICE = 1;
     public static final int SERVICE_INSTANCE = 2;
@@ -58,14 +67,101 @@ public class DefaultScopeDefine {
     public static final int SERVICE_INSTANCE_CLR_THREAD = 21;
     public static final int ENVOY_INSTANCE_METRIC = 22;
     public static final int ZIPKIN_SPAN = 23;
+    @Deprecated
     public static final int JAEGER_SPAN = 24;
+    @Deprecated
     public static final int HTTP_ACCESS_LOG = 25;
     public static final int PROFILE_TASK = 26;
     public static final int PROFILE_TASK_LOG = 27;
     public static final int PROFILE_TASK_SEGMENT_SNAPSHOT = 28;
-    public static final int SERVICE_UPDATE = 29;
+    public static final int SERVICE_META = 29;
     public static final int SERVICE_INSTANCE_UPDATE = 30;
     public static final int NETWORK_ADDRESS_ALIAS = 31;
+    public static final int UI_TEMPLATE = 32;
+    public static final int SERVICE_INSTANCE_JVM_THREAD = 33;
+
+    // browser
+    public static final int BROWSER_ERROR_LOG = 34;
+    public static final int BROWSER_APP_PERF = 35;
+    public static final int BROWSER_APP_PAGE_PERF = 36;
+    public static final int BROWSER_APP_SINGLE_VERSION_PERF = 37;
+    public static final int BROWSER_APP_TRAFFIC = 38;
+    public static final int BROWSER_APP_SINGLE_VERSION_TRAFFIC = 39;
+    public static final int BROWSER_APP_PAGE_TRAFFIC = 40;
+
+    public static final int LOG = 41;
+    public static final int ENDPOINT_META = 42;
+
+    public static final int EVENT = 43;
+
+    public static final int SERVICE_INSTANCE_JVM_CLASS = 44;
+
+    public static final int PROCESS = 45;
+    public static final int EBPF_PROFILING_TASK = 46;
+    public static final int EBPF_PROFILING_SCHEDULE = 47;
+    public static final int EBPF_PROFILING_DATA = 48;
+    public static final int SERVICE_LABEL = 49;
+    public static final int TAG_AUTOCOMPLETE = 50;
+    public static final int ZIPKIN_SERVICE = 51;
+    public static final int ZIPKIN_SERVICE_SPAN = 52;
+    public static final int ZIPKIN_SERVICE_RELATION = 53;
+    public static final int PROCESS_RELATION = 54;
+    public static final int CACHE_ACCESS = 55;
+    public static final int CACHE_SLOW_ACCESS = 56;
+
+    public static final int TCP_SERVICE = 57;
+    public static final int TCP_SERVICE_INSTANCE = 58;
+    public static final int TCP_SERVICE_RELATION = 59;
+    public static final int TCP_SERVICE_INSTANCE_RELATION = 60;
+    public static final int TCP_SERVICE_INSTANCE_UPDATE = 61;
+    public static final int SAMPLED_SLOW_TRACE = 62;
+
+    public static final int MESSAGE_QUEUE_ACCESS = 63;
+    public static final int MESSAGE_QUEUE_ENDPOINT_ACCESS = 64;
+
+    public static final int SPAN_ATTACHED_EVENT = 65;
+    public static final int SAMPLED_STATUS_4XX_TRACE = 66;
+    public static final int SAMPLED_STATUS_5XX_TRACE = 67;
+
+    public static final int CONTINUOUS_PROFILING_POLICY = 68;
+
+    public static final int UI_MENU = 69;
+
+    public static final int SERVICE_HIERARCHY_RELATION = 70;
+    public static final int INSTANCE_HIERARCHY_RELATION = 71;
+
+    public static final int K8S_SERVICE = 72;
+    public static final int K8S_SERVICE_INSTANCE = 73;
+    public static final int K8S_SERVICE_RELATION = 74;
+    public static final int K8S_SERVICE_INSTANCE_RELATION = 75;
+    public static final int K8S_ENDPOINT = 76;
+
+    public static final int CILIUM_SERVICE = 78;
+    public static final int CILIUM_SERVICE_INSTANCE = 79;
+    public static final int CILIUM_SERVICE_RELATION = 80;
+    public static final int CILIUM_SERVICE_INSTANCE_RELATION = 81;
+    public static final int CILIUM_ENDPOINT = 82;
+    public static final int CILIUM_ENDPOINT_REALATION = 83;
+
+    public static final int JFR_PROFILING_DATA = 84;
+    public static final int ASYNC_PROFILER_TASK = 85;
+    public static final int ASYNC_PROFILER_TASK_LOG = 86;
+
+    public static final int BROWSER_APP_WEB_VITALS_PAGE_PERF = 87;
+    public static final int BROWSER_APP_RESOURCE_PERF = 88;
+    public static final int BROWSER_APP_WEB_INTERACTION_PAGE_PERF = 89;
+    public static final int SW_SPAN_ATTACHED_EVENT = 90;
+    public static final int SERVICE_DATABASE_SLOW_STATEMENT = 91;
+    public static final int PPROF_TASK = 92;
+    public static final int PPROF_PROFILING_DATA = 93;
+    public static final int PPROF_TASK_LOG = 94;
+    public static final int ALARM_RECOVERY = 95;
+    public static final int GEN_AI_PROVIDER_ACCESS = 96;
+    public static final int GEN_AI_MODEL_ACCESS = 97;
+    public static final int RUNTIME_RULE = 98;
+    public static final int GEN_AI_EVALUATION_RECORD = 99;
+    public static final int AI_AGENT_SESSION_DATA = 100;
+    public static final int AI_AGENT_SESSION_FLOW = 101;
 
     /**
      * Catalog of scope, the metrics processor could use this to group all generated metrics by oal rt.
@@ -73,10 +169,20 @@ public class DefaultScopeDefine {
     public static final String SERVICE_CATALOG_NAME = "SERVICE";
     public static final String SERVICE_INSTANCE_CATALOG_NAME = "SERVICE_INSTANCE";
     public static final String ENDPOINT_CATALOG_NAME = "ENDPOINT";
+    public static final String SERVICE_RELATION_CATALOG_NAME = "SERVICE_RELATION";
+    public static final String SERVICE_INSTANCE_RELATION_CATALOG_NAME = "SERVICE_INSTANCE_RELATION";
+    public static final String ENDPOINT_RELATION_CATALOG_NAME = "ENDPOINT_RELATION";
+    public static final String PROCESS_CATALOG_NAME = "PROCESS";
+    public static final String PROCESS_RELATION_CATALOG_NAME = "PROCESS_RELATION";
 
     private static final Map<Integer, Boolean> SERVICE_CATALOG = new HashMap<>();
     private static final Map<Integer, Boolean> SERVICE_INSTANCE_CATALOG = new HashMap<>();
     private static final Map<Integer, Boolean> ENDPOINT_CATALOG = new HashMap<>();
+    private static final Map<Integer, Boolean> SERVICE_RELATION_CATALOG = new HashMap<>();
+    private static final Map<Integer, Boolean> SERVICE_INSTANCE_RELATION_CATALOG = new HashMap<>();
+    private static final Map<Integer, Boolean> ENDPOINT_RELATION_CATALOG = new HashMap<>();
+    private static final Map<Integer, Boolean> PROCESS_CATALOG = new HashMap<>();
+    private static final Map<Integer, Boolean> PROCESS_RELATION_CATALOG = new HashMap<>();
 
     @Setter
     private static boolean ACTIVE_EXTRA_MODEL_COLUMNS = false;
@@ -109,7 +215,7 @@ public class DefaultScopeDefine {
      * @param declaration   includes the definition.
      * @param originalClass represents the class having the {@link ScopeDeclaration} annotation
      */
-    private static final void addNewScope(ScopeDeclaration declaration, Class originalClass) {
+    private static void addNewScope(ScopeDeclaration declaration, Class originalClass) {
         int id = declaration.id();
         if (ID_2_NAME.containsKey(id)) {
             throw new UnexpectedException(
@@ -137,19 +243,25 @@ public class DefaultScopeDefine {
         if (virtualColumn != null) {
             scopeDefaultColumns.add(
                 new ScopeDefaultColumn(virtualColumn.fieldName(), virtualColumn.columnName(), virtualColumn
-                    .type(), virtualColumn.isID(), virtualColumn.length()));
+                    .type(), virtualColumn.isID(), virtualColumn.length(), -1, false));
         }
         Field[] scopeClassField = originalClass.getDeclaredFields();
         if (scopeClassField != null) {
             for (Field field : scopeClassField) {
                 ScopeDefaultColumn.DefinedByField definedByField = field.getAnnotation(
                     ScopeDefaultColumn.DefinedByField.class);
+                ScopeDefaultColumn.BanyanDB banyanDB = field.getAnnotation(
+                    ScopeDefaultColumn.BanyanDB.class);
+                int shardingKeyIdx = -1;
+                if (banyanDB != null) {
+                    shardingKeyIdx = banyanDB.shardingKeyIdx();
+                }
                 if (definedByField != null) {
                     if (!definedByField.requireDynamicActive() || ACTIVE_EXTRA_MODEL_COLUMNS) {
                         scopeDefaultColumns.add(
                             new ScopeDefaultColumn(
                                 field.getName(), definedByField.columnName(), field.getType(), false,
-                                definedByField.length()
+                                definedByField.length(), shardingKeyIdx, definedByField.isAttribute()
                             ));
                     }
                 }
@@ -168,6 +280,21 @@ public class DefaultScopeDefine {
                 break;
             case ENDPOINT_CATALOG_NAME:
                 ENDPOINT_CATALOG.put(id, Boolean.TRUE);
+                break;
+            case SERVICE_RELATION_CATALOG_NAME:
+                SERVICE_RELATION_CATALOG.put(id, Boolean.TRUE);
+                break;
+            case SERVICE_INSTANCE_RELATION_CATALOG_NAME:
+                SERVICE_INSTANCE_RELATION_CATALOG.put(id, Boolean.TRUE);
+                break;
+            case ENDPOINT_RELATION_CATALOG_NAME:
+                ENDPOINT_RELATION_CATALOG.put(id, Boolean.TRUE);
+                break;
+            case PROCESS_CATALOG_NAME:
+                PROCESS_CATALOG.put(id, Boolean.TRUE);
+                break;
+            case PROCESS_RELATION_CATALOG_NAME:
+                PROCESS_RELATION_CATALOG.put(id, Boolean.TRUE);
                 break;
         }
     }
@@ -210,7 +337,7 @@ public class DefaultScopeDefine {
     }
 
     /**
-     * Check whether current service belongs service catalog
+     * Check whether the given scope ID belongs service catalog
      *
      * @param scopeId represents an existing scope id.
      * @return true is current scope set {@link ScopeDeclaration#catalog()} == {@link #SERVICE_CATALOG_NAME}
@@ -220,7 +347,7 @@ public class DefaultScopeDefine {
     }
 
     /**
-     * Check whether current service belongs service instance catalog
+     * Check whether the given scope ID belongs service instance catalog
      *
      * @param scopeId represents an existing scope id.
      * @return true is current scope set {@link ScopeDeclaration#catalog()} == {@link #SERVICE_INSTANCE_CATALOG_NAME}
@@ -230,13 +357,97 @@ public class DefaultScopeDefine {
     }
 
     /**
-     * Check whether current service belongs endpoint catalog
+     * Check whether the given scope ID belongs endpoint catalog
      *
      * @param scopeId represents an existing scope id.
      * @return true is current scope set {@link ScopeDeclaration#catalog()} == {@link #ENDPOINT_CATALOG_NAME}
      */
     public static boolean inEndpointCatalog(int scopeId) {
         return ENDPOINT_CATALOG.containsKey(scopeId);
+    }
+
+    /**
+     * Check whether the given scope ID belongs service relation catalog
+     *
+     * @param scopeId represents an existing scope id.
+     * @return true is current scope set {@link ScopeDeclaration#catalog()} == {@link #SERVICE_RELATION_CATALOG_NAME}
+     */
+    public static boolean inServiceRelationCatalog(int scopeId) {
+        return SERVICE_RELATION_CATALOG.containsKey(scopeId);
+    }
+
+    /**
+     * Check whether the given scope ID belongs service instance relation catalog
+     *
+     * @param scopeId represents an existing scope id.
+     * @return true is current scope set {@link ScopeDeclaration#catalog()} == {@link #SERVICE_INSTANCE_RELATION_CATALOG_NAME}
+     */
+    public static boolean inServiceInstanceRelationCatalog(int scopeId) {
+        return SERVICE_INSTANCE_RELATION_CATALOG.containsKey(scopeId);
+    }
+
+    /**
+     * Check whether the given scope ID belongs endpoint relation catalog
+     *
+     * @param scopeId represents an existing scope id.
+     * @return true is current scope set {@link ScopeDeclaration#catalog()} == {@link #ENDPOINT_RELATION_CATALOG_NAME}
+     */
+    public static boolean inEndpointRelationCatalog(int scopeId) {
+        return ENDPOINT_RELATION_CATALOG.containsKey(scopeId);
+    }
+
+    /**
+     * Check whether the given scope ID belongs process catalog
+     *
+     * @param scopeId represents an existing scope id.
+     * @return true is current scope set {@link ScopeDeclaration#catalog()} == {@link #PROCESS_CATALOG_NAME}
+     */
+    public static boolean inProcessCatalog(int scopeId) {
+        return PROCESS_CATALOG.containsKey(scopeId);
+    }
+
+    /**
+     * Check whether the given scope ID belongs process relation catalog
+     *
+     * @param scopeId represents an existing scope id.
+     * @return true is current scope set {@link ScopeDeclaration#catalog()} == {@link #PROCESS_RELATION_CATALOG_NAME}
+     */
+    public static boolean inProcessRelationCatalog(int scopeId) {
+        return PROCESS_RELATION_CATALOG.containsKey(scopeId);
+    }
+
+    /**
+     * Get the catalog string name of the given scope
+     *
+     * @param scope id of the source scope.
+     * @return literal string name of the catalog owning the scope. Return `ALL` by default.
+     */
+    public static String catalogOf(int scope) {
+        if (inServiceCatalog(scope)) {
+            return SERVICE_CATALOG_NAME;
+        }
+        if (inServiceInstanceCatalog(scope)) {
+            return SERVICE_INSTANCE_CATALOG_NAME;
+        }
+        if (inEndpointCatalog(scope)) {
+            return ENDPOINT_CATALOG_NAME;
+        }
+        if (inServiceRelationCatalog(scope)) {
+            return SERVICE_RELATION_CATALOG_NAME;
+        }
+        if (inServiceInstanceRelationCatalog(scope)) {
+            return SERVICE_INSTANCE_RELATION_CATALOG_NAME;
+        }
+        if (inEndpointRelationCatalog(scope)) {
+            return ENDPOINT_RELATION_CATALOG_NAME;
+        }
+        if (inProcessCatalog(scope)) {
+            return PROCESS_CATALOG_NAME;
+        }
+        if (inProcessRelationCatalog(scope)) {
+            return PROCESS_RELATION_CATALOG_NAME;
+        }
+        return "ALL";
     }
 
     /**

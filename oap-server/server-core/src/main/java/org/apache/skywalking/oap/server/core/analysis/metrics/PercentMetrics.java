@@ -18,13 +18,15 @@
 
 package org.apache.skywalking.oap.server.core.analysis.metrics;
 
+import com.google.gson.JsonObject;
 import lombok.Getter;
 import lombok.Setter;
 import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.Entrance;
 import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.Expression;
 import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.MetricsFunction;
-import org.apache.skywalking.oap.server.core.query.sql.Function;
+import org.apache.skywalking.oap.server.core.storage.annotation.BanyanDB;
 import org.apache.skywalking.oap.server.core.storage.annotation.Column;
+import org.apache.skywalking.oap.server.core.storage.annotation.ElasticSearch;
 
 @MetricsFunction(functionName = "percent")
 public abstract class PercentMetrics extends Metrics implements IntValueHolder {
@@ -34,15 +36,19 @@ public abstract class PercentMetrics extends Metrics implements IntValueHolder {
 
     @Getter
     @Setter
-    @Column(columnName = TOTAL)
+    @Column(name = TOTAL, storageOnly = true)
+    @BanyanDB.MeasureField
     private long total;
     @Getter
     @Setter
-    @Column(columnName = PERCENTAGE, dataType = Column.ValueDataType.COMMON_VALUE, function = Function.Avg)
+    @ElasticSearch.EnableDocValues
+    @Column(name = PERCENTAGE, dataType = Column.ValueDataType.COMMON_VALUE)
+    @BanyanDB.MeasureField
     private int percentage;
     @Getter
     @Setter
-    @Column(columnName = MATCH)
+    @Column(name = MATCH, storageOnly = true)
+    @BanyanDB.MeasureField
     private long match;
 
     @Entrance
@@ -54,9 +60,10 @@ public abstract class PercentMetrics extends Metrics implements IntValueHolder {
     }
 
     @Override
-    public final void combine(Metrics metrics) {
+    public final boolean combine(Metrics metrics) {
         total += ((PercentMetrics) metrics).total;
         match += ((PercentMetrics) metrics).match;
+        return true;
     }
 
     @Override
@@ -67,5 +74,12 @@ public abstract class PercentMetrics extends Metrics implements IntValueHolder {
     @Override
     public int getValue() {
         return percentage;
+    }
+
+    @Override
+    protected void appendDebugFields(final JsonObject obj) {
+        obj.addProperty("total", total);
+        obj.addProperty("match", match);
+        obj.addProperty("percentage", percentage);
     }
 }

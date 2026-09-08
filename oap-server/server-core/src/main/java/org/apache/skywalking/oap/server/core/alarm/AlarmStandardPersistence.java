@@ -18,27 +18,49 @@
 
 package org.apache.skywalking.oap.server.core.alarm;
 
-import java.util.List;
+import com.google.common.base.Charsets;
+import com.google.gson.Gson;
+import org.apache.skywalking.oap.server.core.CoreModule;
+import org.apache.skywalking.oap.server.core.analysis.Layer;
 import org.apache.skywalking.oap.server.core.analysis.TimeBucket;
+import org.apache.skywalking.oap.server.core.analysis.manual.searchtag.Tag;
+import org.apache.skywalking.oap.server.core.analysis.manual.searchtag.TagType;
 import org.apache.skywalking.oap.server.core.analysis.worker.RecordStreamProcessor;
+import org.apache.skywalking.oap.server.core.config.ConfigService;
+import org.apache.skywalking.oap.server.core.source.SourceReceiver;
+import org.apache.skywalking.oap.server.core.source.TagAutocomplete;
+import org.apache.skywalking.oap.server.library.module.ModuleManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
 
 /**
  * Save the alarm info into storage for UI query.
  */
 public class AlarmStandardPersistence implements AlarmCallback {
 
-    private static final Logger logger = LoggerFactory.getLogger(AlarmStandardPersistence.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(AlarmStandardPersistence.class);
+    private final Gson gson = new Gson();
+    private final ModuleManager manager;
+    private SourceReceiver receiver;
+
+    public AlarmStandardPersistence(ModuleManager manager) {
+        this.manager = manager;
+    }
 
     @Override
     public void doAlarm(List<AlarmMessage> alarmMessage) {
         alarmMessage.forEach(message -> {
-            if (logger.isDebugEnabled()) {
-                logger.debug("Alarm message: {}", message.getAlarmMessage());
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("Alarm message: {}", message.getAlarmMessage());
             }
 
             AlarmRecord record = new AlarmRecord();
+            record.setUuid(message.getUuid());
             record.setScope(message.getScopeId());
             record.setId0(message.getId0());
             record.setId1(message.getId1());
@@ -46,8 +68,86 @@ public class AlarmStandardPersistence implements AlarmCallback {
             record.setAlarmMessage(message.getAlarmMessage());
             record.setStartTime(message.getStartTime());
             record.setTimeBucket(TimeBucket.getRecordTimeBucket(message.getStartTime()));
-
+            record.setRuleName(message.getRuleName());
+            // Persist a single layer per alarm row — the alarm record stores
+            // one VARCHAR/keyword column on every backend (BanyanDB, ES, JDBC).
+            // For a service observed under multiple layers we record the first
+            // entry in the resolver's natural order (NotifyHandler returns the
+            // metadata-service list as-is for single-entity scopes and a
+            // LinkedHashSet source-first union for relation scopes — both have
+            // a stable first element).
+            //
+            // The GraphQL queryAlarms `layers` filter matches that single
+            // persisted value, so a service in [GENERAL, K8S_SERVICE] alarms
+            // with layer=GENERAL and is only matched by layers:["GENERAL"],
+            // not by layers:["K8S_SERVICE"]. Documented in
+            // docs/en/changes/changes.md under the multi-layer caveat.
+            if (message.getLayers() != null && !message.getLayers().isEmpty()) {
+                record.setLayer(Layer.nameOf(message.getLayers().get(0)));
+            }
+            Collection<Tag> tags = appendSearchableTags(message.getTags());
+            addAutocompleteTags(tags, TimeBucket.getMinuteTimeBucket(message.getStartTime()));
+            record.setTagsRawData(gson.toJson(message.getTags()).getBytes(Charsets.UTF_8));
+            record.setTagsInString(Tag.Util.toStringList(new ArrayList<>(tags)));
+            AlarmSnapshotRecord snapshot = new AlarmSnapshotRecord();
+            snapshot.setExpression(message.getExpression());
+            snapshot.setMetrics(message.getMqeMetricsSnapshot());
+            record.setSnapshot(gson.toJson(snapshot));
             RecordStreamProcessor.getInstance().in(record);
+        });
+    }
+
+    @Override
+    public void doAlarmRecovery(List<AlarmMessage> alarmMessage) {
+        alarmMessage.forEach(message -> {
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("Alarm recovery message: {}", message.getAlarmMessage());
+            }
+            AlarmRecoveryMessage alarmRecoveryMessage = (AlarmRecoveryMessage) message;
+            AlarmRecoveryRecord record = new AlarmRecoveryRecord();
+            record.setUuid(message.getUuid());
+            record.setRecoveryTime(alarmRecoveryMessage.getRecoveryTime());
+            record.setTimeBucket(TimeBucket.getRecordTimeBucket(message.getStartTime()));
+            RecordStreamProcessor.getInstance().in(record);
+        });
+    }
+
+    private SourceReceiver getReceiver() {
+        if (receiver == null) {
+            receiver = manager.find(CoreModule.NAME).provider().getService(SourceReceiver.class);
+        }
+        return receiver;
+    }
+
+    private Collection<Tag> appendSearchableTags(List<Tag> tags) {
+        final ConfigService configService = manager.find(CoreModule.NAME)
+                .provider()
+                .getService(ConfigService.class);
+        HashSet<Tag> alarmTags = new HashSet<>();
+        tags.forEach(tag -> {
+            if (configService.getSearchableAlarmTags().contains(tag.getKey())) {
+                final Tag alarmTag = new Tag(tag.getKey(), tag.getValue());
+
+                if (tag.getValue().length() > Tag.TAG_LENGTH || alarmTag.toString().length() > Tag.TAG_LENGTH) {
+                    if (LOGGER.isDebugEnabled()) {
+                        LOGGER.debug("Alarm tag : {} length > : {}, dropped", alarmTag, Tag.TAG_LENGTH);
+                    }
+                    return;
+                }
+                alarmTags.add(alarmTag);
+            }
+        });
+        return alarmTags;
+    }
+
+    private void addAutocompleteTags(Collection<Tag> alarmTags, long minuteTimeBucket) {
+        alarmTags.forEach(tag -> {
+            TagAutocomplete tagAutocomplete = new TagAutocomplete();
+            tagAutocomplete.setTagKey(tag.getKey());
+            tagAutocomplete.setTagValue(tag.getValue());
+            tagAutocomplete.setTagType(TagType.ALARM);
+            tagAutocomplete.setTimeBucket(minuteTimeBucket);
+            getReceiver().receive(tagAutocomplete);
         });
     }
 }

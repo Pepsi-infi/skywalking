@@ -18,12 +18,15 @@
 
 package org.apache.skywalking.oap.server.core.storage;
 
-import java.io.IOException;
-import java.util.List;
+import org.apache.skywalking.oap.server.core.analysis.TimeBucket;
 import org.apache.skywalking.oap.server.core.analysis.metrics.Metrics;
 import org.apache.skywalking.oap.server.core.storage.model.Model;
 import org.apache.skywalking.oap.server.library.client.request.InsertRequest;
 import org.apache.skywalking.oap.server.library.client.request.UpdateRequest;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Metrics related DAO.
@@ -32,12 +35,12 @@ public interface IMetricsDAO extends DAO {
     /**
      * Read data from the storage by given IDs.
      *
-     * @param model target entity of this query.
-     * @param ids   ID list.
+     * @param model   target entity of this query.
+     * @param metrics metrics list.
      * @return the data of all given IDs. Only include existing data. Don't require to keep the same order of ids list.
      * @throws IOException when error occurs in data query.
      */
-    List<Metrics> multiGet(Model model, List<String> ids) throws IOException;
+    List<Metrics> multiGet(Model model, List<Metrics> metrics) throws Exception;
 
     /**
      * Transfer the given metrics to an executable insert statement.
@@ -45,7 +48,7 @@ public interface IMetricsDAO extends DAO {
      * @return InsertRequest should follow the database client driver datatype, in order to make sure it could be
      * executed ASAP.
      */
-    InsertRequest prepareBatchInsert(Model model, Metrics metrics) throws IOException;
+    InsertRequest prepareBatchInsert(Model model, Metrics metrics, SessionCacheCallback callback) throws IOException;
 
     /**
      * Transfer the given metrics to an executable update statement.
@@ -53,5 +56,22 @@ public interface IMetricsDAO extends DAO {
      * @return UpdateRequest should follow the database client driver datatype, in order to make sure it could be
      * executed ASAP.
      */
-    UpdateRequest prepareBatchUpdate(Model model, Metrics metrics) throws IOException;
+    UpdateRequest prepareBatchUpdate(Model model, Metrics metrics, SessionCacheCallback callback) throws IOException;
+
+    /**
+     * Calculate the expired status of the metric by given current timestamp, metric and TTL.
+     *
+     * @param model             of the given cached value
+     * @param cachedValue       is a metric instance
+     * @param currentTimeMillis current system time of OAP.
+     * @param ttl               from core setting.
+     * @return true if the metric is expired.
+     */
+    default boolean isExpiredCache(Model model, Metrics cachedValue, long currentTimeMillis, int ttl) {
+        final long metricTimestamp = TimeBucket.getTimestamp(
+            cachedValue.getTimeBucket(), model.getDownsampling());
+        // If the cached metric is older than the TTL indicated.
+        return currentTimeMillis - metricTimestamp > TimeUnit.DAYS.toMillis(ttl);
+    }
+
 }

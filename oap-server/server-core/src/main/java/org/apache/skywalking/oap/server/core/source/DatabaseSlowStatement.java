@@ -18,13 +18,15 @@
 
 package org.apache.skywalking.oap.server.core.source;
 
+import com.google.gson.JsonObject;
 import lombok.Getter;
 import lombok.Setter;
 import org.apache.skywalking.oap.server.core.Const;
 
 import static org.apache.skywalking.oap.server.core.source.DefaultScopeDefine.DATABASE_SLOW_STATEMENT;
+import static org.apache.skywalking.oap.server.core.source.DefaultScopeDefine.SERVICE_CATALOG_NAME;
 
-@ScopeDeclaration(id = DATABASE_SLOW_STATEMENT, name = "DatabaseSlowStatement")
+@ScopeDeclaration(id = DATABASE_SLOW_STATEMENT, name = "DatabaseSlowStatement", catalog = SERVICE_CATALOG_NAME)
 public class DatabaseSlowStatement extends Source {
     @Getter
     @Setter
@@ -41,6 +43,9 @@ public class DatabaseSlowStatement extends Source {
     @Getter
     @Setter
     private String traceId;
+    @Getter
+    @Setter
+    private long timestamp;
 
     @Override
     public int scope() {
@@ -50,6 +55,21 @@ public class DatabaseSlowStatement extends Source {
     @Override
     public String getEntityId() {
         return Const.EMPTY_STRING;
+    }
+
+    @Override
+    public String toJson() {
+        final JsonObject obj = new JsonObject();
+        obj.addProperty("scope", scope());
+        obj.addProperty("entityId", getEntityId());
+        obj.addProperty("timeBucket", getTimeBucket());
+        obj.addProperty("id", id);
+        obj.addProperty("databaseServiceId", databaseServiceId);
+        obj.addProperty("statement", statement);
+        obj.addProperty("latency", latency);
+        obj.addProperty("traceId", traceId);
+        obj.addProperty("timestamp", timestamp);
+        return obj.toString();
     }
 
 }

@@ -1,0 +1,438 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+package org.apache.skywalking.oap.server.storage.plugin.banyandb;
+
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Properties;
+import java.util.Set;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.skywalking.banyandb.common.v1.BanyandbCommon;
+import org.apache.skywalking.banyandb.database.v1.BanyandbDatabase;
+import org.apache.skywalking.library.banyandb.v1.client.grpc.exception.BanyanDBException;
+import org.apache.skywalking.oap.server.core.CoreModule;
+import org.apache.skywalking.oap.server.core.RunningMode;
+import org.apache.skywalking.oap.server.core.status.ServerStatusService;
+import org.apache.skywalking.oap.server.core.storage.IBatchDAO;
+import org.apache.skywalking.oap.server.core.storage.IHistoryDeleteDAO;
+import org.apache.skywalking.oap.server.core.storage.StorageBuilderFactory;
+import org.apache.skywalking.oap.server.core.storage.StorageDAO;
+import org.apache.skywalking.oap.server.core.storage.StorageModule;
+import org.apache.skywalking.oap.server.core.storage.cache.INetworkAddressAliasDAO;
+import org.apache.skywalking.oap.server.core.storage.management.RuntimeRuleManagementDAO;
+import org.apache.skywalking.oap.server.core.storage.management.UITemplateManagementDAO;
+import org.apache.skywalking.oap.server.core.storage.model.ModelRegistry;
+import org.apache.skywalking.oap.server.core.storage.model.ModelInstaller;
+import org.apache.skywalking.oap.server.core.storage.profiling.asyncprofiler.IAsyncProfilerTaskLogQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.asyncprofiler.IAsyncProfilerTaskQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.asyncprofiler.IJFRDataQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.pprof.IPprofDataQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.pprof.IPprofTaskLogQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.pprof.IPprofTaskQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.continuous.IContinuousProfilingPolicyDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.ebpf.IEBPFProfilingDataDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.ebpf.IEBPFProfilingScheduleDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.ebpf.IEBPFProfilingTaskDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.ebpf.IServiceLabelDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.trace.IProfileTaskLogQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.trace.IProfileTaskQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.trace.IProfileThreadSnapshotQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IAggregationQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IAlarmQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IBrowserLogQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IEventQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IAIAgentConversationQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IGenAIEvaluationRecordQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IHierarchyQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.ILogQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IMetadataQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IMetricsQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IRecordsQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.ISpanAttachedEventQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.ITagAutoCompleteQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.ITopologyQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.ITraceQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IZipkinQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.ttl.StorageTTLStatusQuery;
+import org.apache.skywalking.oap.server.library.module.ModuleDefine;
+import org.apache.skywalking.oap.server.library.module.ModuleProvider;
+import org.apache.skywalking.oap.server.library.module.ModuleStartException;
+import org.apache.skywalking.oap.server.library.module.ServiceNotProvidedException;
+import org.apache.skywalking.oap.server.library.util.CollectionUtils;
+import org.apache.skywalking.oap.server.library.util.MultipleFilesChangeMonitor;
+import org.apache.skywalking.oap.server.library.util.StringUtil;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.measure.BanyanDBEBPFProfilingScheduleQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBEventQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBAIAgentConversationQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBGenAIEvaluationRecordQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.measure.BanyanDBHierarchyQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.measure.BanyanDBMetadataQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.measure.BanyanDBMetricsQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.measure.BanyanDBNetworkAddressAliasDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.measure.BanyanDBServiceLabelDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.measure.BanyanDBTagAutocompleteQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.measure.BanyanDBTopologyQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBAlarmQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBAsyncProfilerTaskLogQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBAsyncProfilerTaskQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBPprofDataQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBPprofTaskLogQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBPprofTaskQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBBrowserLogQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBContinuousProfilingPolicyDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBEBPFProfilingDataDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBEBPFProfilingTaskDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBHistoryDeleteDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBJFRDataQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBLogQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBProfileTaskLogQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBProfileTaskQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBProfileThreadSnapshotQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBSpanAttachedEventQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.stream.BanyanDBStorageDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.trace.BanyanDBTraceQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.banyandb.trace.BanyanDBZipkinQueryDAO;
+import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
+import org.apache.skywalking.oap.server.telemetry.api.HealthCheckMetrics;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsCreator;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsTag;
+
+@Slf4j
+public class BanyanDBStorageProvider extends ModuleProvider {
+    private BanyanDBStorageConfig config;
+    private volatile BanyanDBStorageClient client;
+    private ModelInstaller modelInstaller;
+
+    @Override
+    public String name() {
+        return "banyandb";
+    }
+
+    @Override
+    public Class<? extends ModuleDefine> module() {
+        return StorageModule.class;
+    }
+
+    @Override
+    public ConfigCreator newConfigCreator() {
+        return new ConfigCreator<BanyanDBStorageConfig>() {
+            @Override
+            public Class type() {
+                return BanyanDBStorageConfig.class;
+            }
+
+            @Override
+            public void onInitialized(final BanyanDBStorageConfig initialized) {
+            }
+        };
+    }
+
+    @Override
+    public void prepare() throws ServiceNotProvidedException, ModuleStartException {
+        // load banyandb config
+        config = new BanyanDBConfigLoader(this).loadConfig();
+        if (StringUtil.isBlank(config.getGlobal().getNamespace())) {
+            config.getGlobal().setNamespace("sw");
+        }
+        if (config.getMetricsDay().getTtl() > config.getMetadata().getTtl()) {
+            throw new ModuleStartException("metricsDay ttl must be less than or equal to metadata ttl");
+        }
+        if (config.getMetricsHour().getTtl() > config.getMetadata().getTtl()) {
+            throw new ModuleStartException("metricsHour must be less than or equal to metadata ttl");
+        }
+        if (config.getMetricsMin().getTtl() > config.getMetadata().getTtl()) {
+            throw new ModuleStartException("metricsMin must be less than or equal to metadata ttl");
+        }
+        this.registerServiceImplementation(StorageBuilderFactory.class, new StorageBuilderFactory.Default());
+
+        loadSecretsManagementFile();
+
+        this.client = new BanyanDBStorageClient(getManager(), config);
+        // Registered only now: a callback that ran while `client` was still null would apply the file to the
+        // config and return, and the monitor would have cached that content and never deliver it again --
+        // leaving the client on the credentials the constructor above snapshotted.
+        watchSecretsManagementFile();
+        rebuildChannelOnTrustCAChange();
+        this.modelInstaller = new BanyanDBIndexInstaller(client, getManager(), this.config);
+        // Expose the installer so the runtime-rule reconciler can call isExists() after a
+        // hot-apply to verify that DDL landed as expected. Needed
+        // especially for BanyanDB, where client.define swallows ALREADY_EXISTS on shape-
+        // changing re-creates; the post-verify catches the silent divergence via describe+diff.
+        this.registerServiceImplementation(ModelInstaller.class, this.modelInstaller);
+
+        // Stream
+        this.registerServiceImplementation(
+            IBatchDAO.class, new BanyanDBBatchDAO(client, config.getGlobal().getMaxBulkSize(), config.getGlobal().getFlushInterval(),
+                                                  config.getGlobal().getConcurrentWriteThreads()
+            ));
+        this.registerServiceImplementation(StorageDAO.class, new BanyanDBStorageDAO(client));
+        this.registerServiceImplementation(INetworkAddressAliasDAO.class, new BanyanDBNetworkAddressAliasDAO(client, this.config));
+        this.registerServiceImplementation(ITraceQueryDAO.class, new BanyanDBTraceQueryDAO(client, this.config.getGlobal().getSegmentQueryMaxSize(), getManager()));
+        this.registerServiceImplementation(IBrowserLogQueryDAO.class, new BanyanDBBrowserLogQueryDAO(client));
+        this.registerServiceImplementation(IMetadataQueryDAO.class, new BanyanDBMetadataQueryDAO(client, this.config));
+        this.registerServiceImplementation(IAlarmQueryDAO.class, new BanyanDBAlarmQueryDAO(client));
+        this.registerServiceImplementation(ILogQueryDAO.class, new BanyanDBLogQueryDAO(client));
+        this.registerServiceImplementation(
+            IGenAIEvaluationRecordQueryDAO.class, new BanyanDBGenAIEvaluationRecordQueryDAO(client));
+        this.registerServiceImplementation(
+            IAIAgentConversationQueryDAO.class, new BanyanDBAIAgentConversationQueryDAO(client));
+        this.registerServiceImplementation(
+            IProfileTaskQueryDAO.class, new BanyanDBProfileTaskQueryDAO(client,
+                                                                        this.config.getGlobal().getProfileTaskQueryMaxSize()
+            ));
+        this.registerServiceImplementation(
+            IProfileTaskLogQueryDAO.class, new BanyanDBProfileTaskLogQueryDAO(client,
+                                                                              this.config.getGlobal().getProfileTaskQueryMaxSize()
+            ));
+        this.registerServiceImplementation(
+            IProfileThreadSnapshotQueryDAO.class, new BanyanDBProfileThreadSnapshotQueryDAO(client,
+                                                                                            this.config.getGlobal().getProfileTaskQueryMaxSize()
+            ));
+        this.registerServiceImplementation(UITemplateManagementDAO.class, new BanyanDBUITemplateManagementDAO(client));
+        this.registerServiceImplementation(RuntimeRuleManagementDAO.class, new BanyanDBRuntimeRuleManagementDAO(client));
+        this.registerServiceImplementation(IEventQueryDAO.class, new BanyanDBEventQueryDAO(client));
+        this.registerServiceImplementation(ITopologyQueryDAO.class, new BanyanDBTopologyQueryDAO(client));
+        this.registerServiceImplementation(IEBPFProfilingTaskDAO.class, new BanyanDBEBPFProfilingTaskDAO(client));
+        this.registerServiceImplementation(IEBPFProfilingDataDAO.class, new BanyanDBEBPFProfilingDataDAO(client, this.config.getGlobal().getProfileDataQueryBatchSize()));
+        this.registerServiceImplementation(
+            IEBPFProfilingScheduleDAO.class, new BanyanDBEBPFProfilingScheduleQueryDAO(client));
+        this.registerServiceImplementation(IContinuousProfilingPolicyDAO.class, new BanyanDBContinuousProfilingPolicyDAO(client));
+
+        this.registerServiceImplementation(IServiceLabelDAO.class, new BanyanDBServiceLabelDAO(client, this.config));
+        this.registerServiceImplementation(ITagAutoCompleteQueryDAO.class, new BanyanDBTagAutocompleteQueryDAO(client));
+        this.registerServiceImplementation(IHistoryDeleteDAO.class, new BanyanDBHistoryDeleteDAO());
+        this.registerServiceImplementation(IMetricsQueryDAO.class, new BanyanDBMetricsQueryDAO(client));
+        this.registerServiceImplementation(IAggregationQueryDAO.class, new BanyanDBAggregationQueryDAO(client));
+        this.registerServiceImplementation(IRecordsQueryDAO.class, new BanyanDBRecordsQueryDAO(client));
+        this.registerServiceImplementation(IZipkinQueryDAO.class, new BanyanDBZipkinQueryDAO(client));
+        this.registerServiceImplementation(ISpanAttachedEventQueryDAO.class, new BanyanDBSpanAttachedEventQueryDAO(client, this.config.getGlobal().getProfileDataQueryBatchSize()));
+        this.registerServiceImplementation(IHierarchyQueryDAO.class, new BanyanDBHierarchyQueryDAO(client, this.config));
+        this.registerServiceImplementation(
+                IAsyncProfilerTaskQueryDAO.class, new BanyanDBAsyncProfilerTaskQueryDAO(client,
+                        this.config.getGlobal().getAsyncProfilerTaskQueryMaxSize()
+                ));
+        this.registerServiceImplementation(
+                IAsyncProfilerTaskLogQueryDAO.class, new BanyanDBAsyncProfilerTaskLogQueryDAO(client,
+                        this.config.getGlobal().getAsyncProfilerTaskQueryMaxSize()
+                ));
+        this.registerServiceImplementation(IJFRDataQueryDAO.class, new BanyanDBJFRDataQueryDAO(client));
+        this.registerServiceImplementation(
+                IPprofTaskQueryDAO.class, new BanyanDBPprofTaskQueryDAO(client,
+                        this.config.getGlobal().getPprofTaskQueryMaxSize()
+                ));
+        this.registerServiceImplementation(
+                IPprofTaskLogQueryDAO.class, new BanyanDBPprofTaskLogQueryDAO(client,
+                        this.config.getGlobal().getPprofTaskQueryMaxSize()
+                ));
+        this.registerServiceImplementation(
+                IPprofDataQueryDAO.class, new BanyanDBPprofDataQueryDAO(client)
+        );
+        this.registerServiceImplementation(
+            StorageTTLStatusQuery.class,
+            new BanyanDBTTLStatusQuery(config)
+        );
+    }
+
+    /**
+     * Load the credentials from the secrets management file, and keep applying them whenever a 3rd party
+     * tool rewrites it. Only the credentials come from this file; the TLS trust CA is watched separately by
+     * {@link #rebuildChannelOnTrustCAChange()}, because it needs a channel rebuild rather than a field swap.
+     *
+     * <p>Whatever the file contains is applied, including a half-populated or empty one. That is deliberate:
+     * a bad file then fails visibly at the next request rather than being quietly refused, which would leave
+     * the working credentials in place and the mistake undiscovered until the next restart. A pair that is
+     * only half populated is applied as no credentials at all, so that the boot path and the reload path
+     * treat the same file the same way.
+     *
+     * <p>Called before {@link #client} is created so that the monitor's initial synchronous check has
+     * already populated the config by the time the client reads it.
+     */
+    private void loadSecretsManagementFile() throws ModuleStartException {
+        final String secretsFile = config.getGlobal().getSecretsManagementFile();
+        if (StringUtil.isBlank(secretsFile)) {
+            return;
+        }
+        final File file = new File(secretsFile);
+        if (!file.exists() || !file.isFile()) {
+            // Absent at boot is legitimate: the credentials then come from bydb.yml, and the watcher picks
+            // the file up if a 3rd party tool creates it later.
+            return;
+        }
+        try {
+            applyCredentials(Files.readAllBytes(file.toPath()), secretsFile);
+        } catch (IOException e) {
+            throw new ModuleStartException("Failed to read the secrets management file " + secretsFile, e);
+        }
+    }
+
+    private void watchSecretsManagementFile() {
+        final String secretsFile = config.getGlobal().getSecretsManagementFile();
+        if (StringUtil.isBlank(secretsFile)) {
+            return;
+        }
+        new MultipleFilesChangeMonitor(
+            10, readableContents -> applyCredentials(readableContents.get(0), secretsFile), secretsFile).start();
+    }
+
+    private void applyCredentials(final byte[] secretsFileContent, final String secretsFile) throws IOException {
+        if (secretsFileContent == null) {
+            return;
+        }
+        final Properties secrets = new Properties();
+        secrets.load(new ByteArrayInputStream(secretsFileContent));
+        String user = secrets.getProperty("user", null);
+        String password = secrets.getProperty("password", null);
+        final boolean complete = StringUtil.isNotBlank(user) && StringUtil.isNotBlank(password);
+        if (!complete) {
+            // Normalised to no credentials rather than left half-populated. This callback also runs
+            // before the client exists, and BanyanDBStorageClient refuses to be constructed from a
+            // half-populated pair, so leaving one half set would let a file that is only momentarily
+            // incomplete during a rotation stop the OAP from booting -- while the very same file, written
+            // once it is running, merely degrades to unauthenticated requests.
+            user = null;
+            password = null;
+            log.error(
+                "Applied incomplete credentials from {}: requests are sent without authentication, because "
+                    + "a username and a password are only ever attached together. BanyanDB answers them "
+                    + "with UNAUTHENTICATED if it requires authentication.", secretsFile);
+        }
+        config.getGlobal().setUser(user);
+        config.getGlobal().setPassword(password);
+
+        final BanyanDBStorageClient current = client;
+        if (current != null) {
+            // AuthInterceptor reads the credentials per RPC, so this applies to the next call without
+            // reconnecting. Before the client exists the config above is all that is needed.
+            current.client.updateCredentials(user, password);
+            if (complete) {
+                log.info("Applied the BanyanDB credentials reloaded from {}, user={}", secretsFile, user);
+            }
+        }
+    }
+
+    /**
+     * Rebuild the gRPC channel whenever the TLS trust CA file changes, so a rotated CA is picked up while the
+     * connection is still healthy. Without this the CA is only re-read after the certificate in use has already
+     * caused requests to fail, because that is the only thing the client's channel manager reacts to.
+     *
+     * <p>Only the fact that the file changed is used, not its content — the channel factory reads the CA from disk
+     * itself when it builds the replacement.
+     */
+    private void rebuildChannelOnTrustCAChange() {
+        final String trustCAFile = config.getGlobal().getSslTrustCAPath();
+        if (StringUtil.isBlank(trustCAFile)) {
+            return;
+        }
+        new MultipleFilesChangeMonitor(10, readableContents -> {
+            if (readableContents.get(0) == null || client == null) {
+                return;
+            }
+            try {
+                client.client.rebuildChannel();
+                log.info("Rebuilt the BanyanDB channel to reload the TLS trust CA from {}", trustCAFile);
+            } catch (IOException e) {
+                log.error(
+                    "Failed to rebuild the BanyanDB channel after {} changed. The current channel keeps serving "
+                        + "with the previous trust CA.", trustCAFile, e);
+            }
+        }, trustCAFile).start();
+    }
+
+    @Override
+    public void start() throws ServiceNotProvidedException, ModuleStartException {
+        MetricsCreator metricCreator = getManager().find(TelemetryModule.NAME)
+                                                   .provider()
+                                                   .getService(MetricsCreator.class);
+        HealthCheckMetrics healthChecker = metricCreator.createHealthCheckerGauge(
+            "storage_banyandb", MetricsTag.EMPTY_KEY, MetricsTag.EMPTY_VALUE);
+        this.client.registerChecker(healthChecker);
+        try {
+            this.client.connect();
+            this.modelInstaller.start();
+
+            getManager().find(CoreModule.NAME).provider().getService(ModelRegistry.class).addModelListener(modelInstaller);
+
+            ServerStatusService serverStatusService =
+                getManager().find(CoreModule.NAME).provider().getService(ServerStatusService.class);
+            serverStatusService.registerConfigDumpExtension(
+                new BanyanDBConfigDumpExtension(StorageModule.NAME + "." + name(), this.config));
+        } catch (Exception e) {
+            throw new ModuleStartException(e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public void notifyAfterCompleted() throws ServiceNotProvidedException, ModuleStartException {
+        if (!RunningMode.isNoInitMode()) {
+            try {
+                List<BanyandbCommon.Group> groups = this.client.client.findGroups();
+                cleanupUnusedTopNRules(groups);
+                //todo: can not delete indexRules now, because banyanDB server can not delete or update Tags.
+            } catch (BanyanDBException e) {
+                throw new ModuleStartException(e.getMessage(), e);
+            }
+        }
+    }
+
+    @Override
+    public String[] requiredModules() {
+        return new String[] {CoreModule.NAME};
+    }
+
+    // Cleanup TopN rules in BanyanDB server that are not configured in the current config.
+    private void cleanupUnusedTopNRules(List<BanyandbCommon.Group> groups) throws BanyanDBException {
+        Set<String> topNNames = new HashSet<>();
+        this.config.getTopNConfigs().values().forEach(topNConfig -> {
+            topNNames.addAll(topNConfig.keySet());
+        });
+        for (BanyandbCommon.Group group : groups) {
+            if (BanyandbCommon.Catalog.CATALOG_MEASURE.equals(group.getCatalog())) {
+                String groupName = group.getMetadata().getName();
+                List<BanyandbDatabase.TopNAggregation> topNAggregations = this.client.client.findTopNAggregations(
+                    groupName);
+                if (CollectionUtils.isNotEmpty(topNAggregations)) {
+                    for (BanyandbDatabase.TopNAggregation topNAggregation : topNAggregations) {
+                        String topNName = topNAggregation.getMetadata().getName();
+                        if (!topNNames.contains(topNName)) {
+                            if (this.config.getGlobal().isCleanupUnusedTopNRules()) {
+                                this.client.client.deleteTopNAggregation(groupName, topNName);
+                                log.info(
+                                    "Deleted unused topN rule from BanyanDB server: {}, group: {}. Please check bydb-topn.yml. " +
+                                        "If you don't want to cleanup unused rules from server, please set cleanupUnusedTopNRules=false in bydb.yml",
+                                    topNName, groupName
+                                );
+                            } else {
+                                // Log the unused TopN aggregation.
+                                log.warn(
+                                    "Unused topN rule in BanyanDB server: {}, group: {}. Please check bydb-topn.yml. " +
+                                        "If you want to cleanup unused rules from server, please set cleanupUnusedTopNRules=true in bydb.yml",
+                                    topNName, groupName
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

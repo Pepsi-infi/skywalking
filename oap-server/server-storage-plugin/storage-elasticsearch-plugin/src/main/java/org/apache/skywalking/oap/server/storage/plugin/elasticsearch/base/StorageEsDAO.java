@@ -19,13 +19,15 @@
 package org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base;
 
 import org.apache.skywalking.oap.server.core.analysis.config.NoneStream;
+import org.apache.skywalking.oap.server.core.analysis.management.ManagementData;
 import org.apache.skywalking.oap.server.core.analysis.metrics.Metrics;
 import org.apache.skywalking.oap.server.core.analysis.record.Record;
+import org.apache.skywalking.oap.server.core.storage.IManagementDAO;
 import org.apache.skywalking.oap.server.core.storage.IMetricsDAO;
 import org.apache.skywalking.oap.server.core.storage.INoneStreamDAO;
 import org.apache.skywalking.oap.server.core.storage.IRecordDAO;
-import org.apache.skywalking.oap.server.core.storage.StorageBuilder;
 import org.apache.skywalking.oap.server.core.storage.StorageDAO;
+import org.apache.skywalking.oap.server.core.storage.type.StorageBuilder;
 import org.apache.skywalking.oap.server.library.client.elasticsearch.ElasticSearchClient;
 
 public class StorageEsDAO extends EsDAO implements StorageDAO {
@@ -35,17 +37,22 @@ public class StorageEsDAO extends EsDAO implements StorageDAO {
     }
 
     @Override
-    public IMetricsDAO newMetricsDao(StorageBuilder<Metrics> storageBuilder) {
-        return new MetricsEsDAO(getClient(), storageBuilder);
+    public IMetricsDAO newMetricsDao(StorageBuilder storageBuilder) {
+        return new MetricsEsDAO(getClient(), (StorageBuilder<Metrics>) storageBuilder);
     }
 
     @Override
-    public IRecordDAO newRecordDao(StorageBuilder<Record> storageBuilder) {
-        return new RecordEsDAO(getClient(), storageBuilder);
+    public IRecordDAO newRecordDao(StorageBuilder storageBuilder) {
+        return new RecordEsDAO(getClient(), (StorageBuilder<Record>) storageBuilder);
     }
 
     @Override
-    public INoneStreamDAO newNoneStreamDao(StorageBuilder<NoneStream> storageBuilder) {
-        return new NoneStreamEsDAO(getClient(), storageBuilder);
+    public INoneStreamDAO newNoneStreamDao(StorageBuilder storageBuilder) {
+        return new NoneStreamEsDAO(getClient(), (StorageBuilder<NoneStream>) storageBuilder);
+    }
+
+    @Override
+    public IManagementDAO newManagementDao(StorageBuilder storageBuilder) {
+        return new ManagementEsDAO(getClient(), (StorageBuilder<ManagementData>) storageBuilder);
     }
 }

@@ -18,9 +18,7 @@
 
 package org.apache.skywalking.oap.server.core.storage;
 
-import org.apache.skywalking.oap.server.core.analysis.config.NoneStream;
-import org.apache.skywalking.oap.server.core.analysis.metrics.Metrics;
-import org.apache.skywalking.oap.server.core.analysis.record.Record;
+import org.apache.skywalking.oap.server.core.storage.type.StorageBuilder;
 import org.apache.skywalking.oap.server.library.module.Service;
 
 /**
@@ -28,9 +26,11 @@ import org.apache.skywalking.oap.server.library.module.Service;
  */
 public interface StorageDAO extends Service {
 
-    IMetricsDAO newMetricsDao(StorageBuilder<Metrics> storageBuilder);
+    IMetricsDAO newMetricsDao(StorageBuilder storageBuilder);
 
-    IRecordDAO newRecordDao(StorageBuilder<Record> storageBuilder);
+    IRecordDAO newRecordDao(StorageBuilder storageBuilder);
 
-    INoneStreamDAO newNoneStreamDao(StorageBuilder<NoneStream> storageBuilder);
+    INoneStreamDAO newNoneStreamDao(StorageBuilder storageBuilder);
+
+    IManagementDAO newManagementDao(StorageBuilder storageBuilder);
 }

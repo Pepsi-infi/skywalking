@@ -18,132 +18,166 @@
 
 package org.apache.skywalking.oap.server.cluster.plugin.kubernetes;
 
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.ListeningExecutorService;
-import com.google.common.util.concurrent.MoreExecutors;
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.function.Supplier;
-import javax.annotation.Nullable;
+import com.linecorp.armeria.client.Endpoint;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.skywalking.library.kubernetes.SharedKubernetesClient;
 import org.apache.skywalking.oap.server.core.CoreModule;
-import org.apache.skywalking.oap.server.core.cluster.ClusterNodesQuery;
-import org.apache.skywalking.oap.server.core.cluster.ClusterRegister;
+import org.apache.skywalking.oap.server.core.cluster.ClusterCoordinator;
 import org.apache.skywalking.oap.server.core.cluster.RemoteInstance;
+import org.apache.skywalking.oap.server.core.cluster.ServiceQueryException;
 import org.apache.skywalking.oap.server.core.cluster.ServiceRegisterException;
 import org.apache.skywalking.oap.server.core.config.ConfigService;
 import org.apache.skywalking.oap.server.core.remote.client.Address;
 import org.apache.skywalking.oap.server.library.module.ModuleDefineHolder;
-import org.apache.skywalking.oap.server.telemetry.api.TelemetryRelatedContext;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.skywalking.oap.server.library.util.StringUtil;
+import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
+import org.apache.skywalking.oap.server.telemetry.api.HealthCheckMetrics;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsCreator;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsTag;
+
+import com.google.common.base.Strings;
+import com.linecorp.armeria.client.endpoint.EndpointGroup;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
 
 /**
- * Read collector pod info from api-server of kubernetes, then using all containerIp list to construct the list of
+ * Read collector pod info from Kubernetes using KubernetesLabelSelectorEndpointGroup, then construct the list of
  * {@link RemoteInstance}.
  */
-public class KubernetesCoordinator implements ClusterRegister, ClusterNodesQuery {
-
-    private static final Logger logger = LoggerFactory.getLogger(KubernetesCoordinator.class);
-
+@Slf4j
+public class KubernetesCoordinator extends ClusterCoordinator {
     private final ModuleDefineHolder manager;
-
-    private final String uid;
-
-    private final Map<String, RemoteInstance> cache = new ConcurrentHashMap<>();
-
-    private final ReusableWatch<Event> watch;
-
     private volatile int port = -1;
+    private HealthCheckMetrics healthChecker;
+    private ClusterModuleKubernetesConfig config;
 
-    KubernetesCoordinator(ModuleDefineHolder manager, final ReusableWatch<Event> watch,
-        final Supplier<String> uidSupplier) {
+    private EndpointGroup endpointGroup;
+    private volatile List<RemoteInstance> remoteInstances;
+
+    public KubernetesCoordinator(final ModuleDefineHolder manager,
+                                 final ClusterModuleKubernetesConfig config) {
         this.manager = manager;
-        this.watch = watch;
-        this.uid = uidSupplier.get();
-        TelemetryRelatedContext.INSTANCE.setId(uid);
+        this.config = config;
+
+        if (Strings.isNullOrEmpty(config.getLabelSelector())) {
+            throw new IllegalArgumentException("kubernetes labelSelector must be provided");
+        }
     }
 
-    public void start() {
-        ExecutorService executorService = Executors.newSingleThreadExecutor(new ThreadFactoryBuilder().setDaemon(true)
-                                                                                                      .setNameFormat("Kubernetes-ApiServer-%s")
-                                                                                                      .build());
-        submitTask(MoreExecutors.listeningDecorator(executorService), executorService);
+    EndpointGroup createEndpointGroup() {
+        if (port == -1) {
+            port = manager.find(CoreModule.NAME).provider().getService(ConfigService.class).getGRPCPort();
+        }
+        final var builder = KubernetesLabelSelectorEndpointGroup.builder(
+            SharedKubernetesClient.INSTANCE.get());
+
+        if (StringUtil.isNotBlank(config.getNamespace())) {
+            builder.namespace(config.getNamespace());
+        }
+
+        final var labelMap = parseLabelSelector(config.getLabelSelector());
+        builder.labelSelector(labelMap);
+
+        builder.port(port);
+        builder.selfUid(new UidEnvSupplier(config.getUidEnvName()).get());
+
+        return builder.build();
     }
 
-    @Override
-    public void registerRemote(RemoteInstance remoteInstance) throws ServiceRegisterException {
-        this.port = remoteInstance.getAddress().getPort();
-    }
+    private Map<String, String> parseLabelSelector(String labelSelector) {
+        final var labels = new HashMap<String, String>();
+        if (StringUtil.isBlank(labelSelector)) {
+            return labels;
+        }
 
-    private void submitTask(final ListeningExecutorService service, final ExecutorService executorService) {
-        watch.initOrReset();
-
-        ListenableFuture<?> watchFuture = service.submit(newWatch());
-        Futures.addCallback(watchFuture, new FutureCallback<Object>() {
-            @Override
-            public void onSuccess(@Nullable Object ignored) {
-                submitTask(service, executorService);
-            }
-
-            @Override
-            public void onFailure(@Nullable Throwable throwable) {
-                logger.debug("Generate remote nodes error", throwable);
-                submitTask(service, executorService);
-            }
-        }, executorService);
-    }
-
-    private Callable<Object> newWatch() {
-        return () -> {
-            generateRemoteNodes();
-            return null;
-        };
-    }
-
-    private void generateRemoteNodes() {
-        for (Event event : watch) {
-            if (event == null) {
-                break;
-            }
-            logger.debug("Received event {} {}-{}", event.getType(), event.getUid(), event.getHost());
-            switch (event.getType()) {
-                case "ADDED":
-                case "MODIFIED":
-                    cache.put(event.getUid(), new RemoteInstance(new Address(event.getHost(), port, event.getUid()
-                                                                                                         .equals(this.uid))));
-                    break;
-                case "DELETED":
-                    cache.remove(event.getUid());
-                    break;
-                default:
-                    throw new RuntimeException(String.format("Unknown event %s", event.getType()));
+        final var pairs = labelSelector.split(",");
+        for (final var pair : pairs) {
+            final var keyValue = pair.trim().split("=", 2);
+            if (keyValue.length == 2) {
+                labels.put(keyValue[0].trim(), keyValue[1].trim());
             }
         }
+        return labels;
     }
 
     @Override
     public List<RemoteInstance> queryRemoteNodes() {
-        final List<RemoteInstance> list = new ArrayList<>();
-        cache.values().forEach(instance -> {
-            Address address = instance.getAddress();
-            if (port == -1) {
-                logger.debug("Query kubernetes remote, port hasn't init, try to init");
-                ConfigService service = manager.find(CoreModule.NAME).provider().getService(ConfigService.class);
-                port = service.getGRPCPort();
-                logger.debug("Query kubernetes remote, port is set at {}", port);
-            }
-            list.add(new RemoteInstance(new Address(address.getHost(), port, address.isSelf())));
-        });
+        try {
+            healthChecker.health();
+            return remoteInstances;
+        } catch (Throwable e) {
+            healthChecker.unHealth(e);
+            throw new ServiceQueryException(e.getMessage());
+        }
+    }
 
-        logger.debug("Query kubernetes remote nodes: {}", list);
-        return list;
+    @Override
+    public void registerRemote(final RemoteInstance remoteInstance) throws ServiceRegisterException {
+        try {
+            this.port = remoteInstance.getAddress().getPort();
+            healthChecker.health();
+        } catch (Throwable e) {
+            healthChecker.unHealth(e);
+            throw new ServiceRegisterException(e.getMessage());
+        }
+    }
+
+    private void initHealthChecker() {
+        if (healthChecker == null) {
+            MetricsCreator metricCreator = manager.find(TelemetryModule.NAME)
+                                                  .provider()
+                                                  .getService(MetricsCreator.class);
+            healthChecker = metricCreator.createHealthCheckerGauge(
+                "cluster_k8s", MetricsTag.EMPTY_KEY, MetricsTag.EMPTY_VALUE);
+        }
+    }
+
+    @Override
+    public void start() {
+        endpointGroup = createEndpointGroup();
+        endpointGroup.addListener(endpoints -> {
+            if (port == -1) {
+                port = manager.find(CoreModule.NAME).provider().getService(ConfigService.class).getGRPCPort();
+            }
+
+            if (log.isDebugEnabled()) {
+                log.debug("[kubernetes cluster endpoints]: {}", endpoints);
+            }
+
+            // The endpoint group now includes self in the list.
+            // Identify self by matching against getSelfEndpoint().
+            Endpoint selfEndpoint = null;
+            if (endpointGroup instanceof SelfEndpointAccessor) {
+                selfEndpoint = ((SelfEndpointAccessor) endpointGroup).getSelfEndpoint();
+            }
+
+            final Endpoint finalSelfEndpoint = selfEndpoint;
+            final var instances = endpoints.stream()
+                    .map(endpoint -> {
+                        final boolean isSelf = finalSelfEndpoint != null
+                            && endpoint.host().equals(finalSelfEndpoint.host())
+                            && endpoint.port() == finalSelfEndpoint.port();
+                        return new RemoteInstance(new Address(endpoint.host(), endpoint.port(), isSelf));
+                    })
+                    .collect(Collectors.toList());
+
+            // If self was not found in the endpoint list (informer hasn't synced self yet),
+            // add a fallback self instance so the cluster always has a self node.
+            if (instances.stream().noneMatch(i -> i.getAddress().isSelf())) {
+                instances.add(new RemoteInstance(new Address("127.0.0.1", port, true)));
+            }
+
+            if (log.isDebugEnabled()) {
+                instances.forEach(instance -> log.debug("kubernetes cluster instance: {}", instance));
+            }
+
+            this.remoteInstances = instances;
+            notifyWatchers(instances);
+        }, true);
+        initHealthChecker();
     }
 }

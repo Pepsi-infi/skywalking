@@ -1,0 +1,298 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Mock input data and expected output for execution-basic.yaml rules.
+# Format: YAML keyed by rule name. Each entry describes body-type, body,
+# optional tags, and expected assertions after execution.
+
+json-parse-extract:
+  body-type: json
+  body: '{"service":"my-svc","instance":"inst-01","endpoint":"/api","layer":"GENERAL"}'
+  expect:
+    service: my-svc
+    instance: inst-01
+    endpoint: /api
+    layer: GENERAL
+    save: true
+    abort: false
+
+tag-condition-true:
+  body-type: json
+  body: '{"service":"db-svc"}'
+  tags:
+    LOG_KIND: SLOW_SQL
+  expect:
+    service: db-svc
+
+tag-condition-false:
+  body-type: json
+  body: '{"service":"db-svc"}'
+  tags:
+    LOG_KIND: NORMAL
+  expect:
+    service: ""
+
+tag-assignment:
+  body-type: json
+  body: '{"env":"prod","region":"us-east"}'
+  expect:
+    tag.key1: prod
+    tag.key2: us-east
+
+safe-nav-missing:
+  body-type: json
+  body: '{"other":"val"}'
+  expect:
+    service: ""
+    abort: false
+
+safe-nav-present:
+  body-type: json
+  body: '{"data":{"name":"found"}}'
+  expect:
+    service: found
+
+if-else-if-error:
+  body-type: json
+  body: '{"level":"ERROR"}'
+  expect:
+    service: error-handler
+
+if-else-if-warn:
+  body-type: json
+  body: '{"level":"WARN"}'
+  expect:
+    service: warn-handler
+
+if-else-if-default:
+  body-type: json
+  body: '{"level":"DEBUG"}'
+  expect:
+    service: default-handler
+
+sink-enforcer:
+  body-type: json
+  body: '{}'
+  expect:
+    save: true
+
+sink-dropper:
+  body-type: json
+  body: '{}'
+  expect:
+    save: false
+
+sampler-rate-limit:
+  body-type: json
+  body: '{}'
+  expect:
+    save: true
+
+sampler-interpolated-id:
+  body-type: json
+  body: '{"code":"200"}'
+  expect:
+    save: true
+
+abort-stops-pipeline:
+  body-type: json
+  body: '{"service":"should-not-be-set"}'
+  expect:
+    abort: true
+    service: ""
+
+conditional-abort-true:
+  body-type: json
+  body: '{"skip":"true","service":"my-svc"}'
+  expect:
+    abort: true
+    service: ""
+
+conditional-abort-false:
+  body-type: json
+  body: '{"skip":"false","service":"my-svc"}'
+  expect:
+    abort: false
+    service: my-svc
+
+timestamp-extraction:
+  body-type: json
+  body: '{"time":"1609459200000"}'
+  expect:
+    timestamp: 1609459200000
+
+text-parser-regexp:
+  body-type: text
+  body: "1609459200000 ERROR Something failed"
+  expect:
+    service: ERROR
+
+source-attribute-tag:
+  body-type: json
+  body: '{"msg":"hello"}'
+  source-attributes:
+    device.model.identifier: "iPhone15,2"
+    os.name: "iOS"
+    os.version: "17.4.1"
+  expect:
+    save: true
+    tag.device.model: "iPhone15,2"
+    tag.os.name: "iOS"
+
+source-attribute-condition:
+  body-type: json
+  body: '{"msg":"hello"}'
+  source-attributes:
+    os.name: "iOS"
+  expect:
+    save: true
+    layer: IOS
+    tag.platform: "ios"
+
+source-attribute-missing:
+  body-type: json
+  body: '{"msg":"hello"}'
+  expect:
+    save: true
+    tag.missing: ""
+
+auto-layer-set:
+  body-type: json
+  body: '{"service":"MyApp"}'
+  source-attributes:
+    os.name: "iOS"
+  expect:
+    save: true
+    layer: IOS
+    service: MyApp
+
+auto-layer-not-set:
+  body-type: json
+  body: '{"service":"MyApp"}'
+  expect:
+    save: true
+    service: MyApp
+
+auto-layer-abort:
+  - body-type: json
+    body: '{"msg":"hello"}'
+    source-attributes:
+      os.name: "iOS"
+    expect:
+      save: true
+      layer: IOS
+  - body-type: json
+    body: '{"msg":"hello"}'
+    source-attributes:
+      os.name: "Android"
+    expect:
+      abort: true
+
+# json {} falls back to the text body when the JSON body is empty — the OTLP log
+# receiver wraps every string body as text, even JSON-shaped ones. On success the
+# body is normalized to JSON, so the log persists with content type JSON.
+json-text-fallback:
+  body-type: text
+  body: '{"service":"otlp-svc","env":"prod"}'
+  expect:
+    save: true
+    abort: false
+    service: otlp-svc
+    tag.env: prod
+    contentType: JSON
+
+# Non-JSON text under the fallback still aborts (default abortOnFailure true), and the
+# drop reason is recorded on ctx so live-debug can surface WHY it dropped.
+json-text-fallback-invalid:
+  body-type: text
+  body: 'plain non-json log line'
+  expect:
+    abort: true
+    dropReason: "json parse failed"
+
+# abortOnFailure false: a json parse failure must NOT abort — the log flows through,
+# and parsed.* reads stay null-safe with metadata values as fallback. A continued log is
+# not dropped, so NO drop reason is recorded.
+json-abort-on-failure-false:
+  service: fallback-svc
+  body-type: text
+  body: 'plain non-json log line'
+  expect:
+    abort: false
+    save: true
+    service: fallback-svc
+    noDropReason: true
+
+# A parse failure that continued (abortOnFailure false) must NOT leave a stale reason for a
+# later explicit abort {} to inherit — the abort has no recorded cause.
+json-continue-then-abort:
+  body-type: text
+  body: 'plain non-json log line'
+  expect:
+    abort: true
+    noDropReason: true
+
+# abortOnFailure false on a text regexp: a no-match must NOT abort, and records no reason.
+text-abort-on-failure-false:
+  body-type: text
+  body: 'a line that does not match the level pattern'
+  expect:
+    abort: false
+    save: true
+    noDropReason: true
+
+trace-context-read:
+  body-type: json
+  body: '{"service":"trace-svc"}'
+  trace-id: trace-aaa
+  trace-segment-id: segment-bbb
+  span-id: 7
+  expect:
+    service: trace-svc
+    tag.tid: trace-aaa
+    tag.sid: segment-bbb
+    tag.spid: "7"
+    traceId: trace-aaa
+    segmentId: segment-bbb
+    spanId: "7"
+    save: true
+    abort: false
+
+trace-segment-override:
+  body-type: json
+  body: '{"service":"trace-svc","seg":"segment-from-body"}'
+  trace-id: trace-aaa
+  trace-segment-id: segment-bbb
+  span-id: 7
+  expect:
+    service: trace-svc
+    segmentId: segment-from-body
+    traceId: trace-aaa
+    save: true
+    abort: false
+
+trace-write-all-three:
+  body-type: json
+  body: '{"service":"trace-svc","tid":"tid-from-body","seg":"seg-from-body","sp":"3"}'
+  trace-id: trace-aaa
+  trace-segment-id: segment-bbb
+  span-id: 7
+  expect:
+    service: trace-svc
+    traceId: tid-from-body
+    segmentId: seg-from-body
+    spanId: "3"
+    save: true
+    abort: false

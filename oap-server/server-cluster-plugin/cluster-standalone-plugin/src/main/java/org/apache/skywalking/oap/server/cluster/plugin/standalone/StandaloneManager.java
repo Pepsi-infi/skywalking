@@ -19,16 +19,15 @@
 package org.apache.skywalking.oap.server.cluster.plugin.standalone;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import org.apache.skywalking.oap.server.core.cluster.ClusterNodesQuery;
-import org.apache.skywalking.oap.server.core.cluster.ClusterRegister;
+import org.apache.skywalking.oap.server.core.cluster.ClusterCoordinator;
 import org.apache.skywalking.oap.server.core.cluster.RemoteInstance;
-import org.apache.skywalking.oap.server.telemetry.api.TelemetryRelatedContext;
 
 /**
  * A cluster manager simulator. Work in memory only. Also return the current instance.
  */
-public class StandaloneManager implements ClusterNodesQuery, ClusterRegister {
+public class StandaloneManager extends ClusterCoordinator {
 
     private volatile RemoteInstance remoteInstance;
 
@@ -36,7 +35,6 @@ public class StandaloneManager implements ClusterNodesQuery, ClusterRegister {
     public void registerRemote(RemoteInstance remoteInstance) {
         this.remoteInstance = remoteInstance;
         this.remoteInstance.getAddress().setSelf(true);
-        TelemetryRelatedContext.INSTANCE.setId("standalone");
     }
 
     @Override
@@ -47,5 +45,13 @@ public class StandaloneManager implements ClusterNodesQuery, ClusterRegister {
         ArrayList remoteList = new ArrayList(1);
         remoteList.add(remoteInstance);
         return remoteList;
+    }
+
+    public void notifyWatchers() {
+        notifyWatchers(Collections.singletonList(remoteInstance));
+    }
+
+    @Override
+    public void start() {
     }
 }

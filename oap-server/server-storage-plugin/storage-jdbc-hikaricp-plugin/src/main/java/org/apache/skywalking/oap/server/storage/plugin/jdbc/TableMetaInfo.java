@@ -18,18 +18,35 @@
 
 package org.apache.skywalking.oap.server.storage.plugin.jdbc;
 
-import java.util.HashMap;
-import java.util.Map;
 import org.apache.skywalking.oap.server.core.storage.model.Model;
 
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * Consider there additional table columns need to remove from model columns, SQL storage implementation
+ * should get model from here.
+ */
 public class TableMetaInfo {
-    private static Map<String, Model> TABLES = new HashMap<>();
+    private static final Map<String, Model> TABLES = new HashMap<>();
 
     public static void addModel(Model model) {
+        // remove exclude columns according to @SQLDatabase.AdditionalEntity
+        model.getColumns().removeAll(model.getSqlDBModelExtension().getExcludeColumns());
         TABLES.put(model.getName(), model);
     }
 
     public static Model get(String moduleName) {
         return TABLES.get(moduleName);
+    }
+
+    /**
+     * All locally-installed models. The inspect foreign-metric probe uses this to enumerate the
+     * node's metric function tables without a per-metric {@link Model} lookup.
+     */
+    public static Collection<Model> getModels() {
+        return Collections.unmodifiableCollection(TABLES.values());
     }
 }

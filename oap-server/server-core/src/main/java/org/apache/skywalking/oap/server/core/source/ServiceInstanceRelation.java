@@ -18,15 +18,17 @@
 
 package org.apache.skywalking.oap.server.core.source;
 
+import com.google.gson.JsonObject;
 import lombok.Getter;
 import lombok.Setter;
-import org.apache.skywalking.apm.util.StringUtil;
+import org.apache.skywalking.oap.server.core.analysis.Layer;
+import org.apache.skywalking.oap.server.library.util.StringUtil;
 import org.apache.skywalking.oap.server.core.analysis.IDManager;
-import org.apache.skywalking.oap.server.core.analysis.NodeType;
 
 import static org.apache.skywalking.oap.server.core.source.DefaultScopeDefine.SERVICE_INSTANCE_RELATION;
+import static org.apache.skywalking.oap.server.core.source.DefaultScopeDefine.SERVICE_INSTANCE_RELATION_CATALOG_NAME;
 
-@ScopeDeclaration(id = SERVICE_INSTANCE_RELATION, name = "ServiceInstanceRelation")
+@ScopeDeclaration(id = SERVICE_INSTANCE_RELATION, name = "ServiceInstanceRelation", catalog = SERVICE_INSTANCE_RELATION_CATALOG_NAME)
 @ScopeDefaultColumn.VirtualColumnDefinition(fieldName = "entityId", columnName = "entity_id", isID = true, type = String.class)
 public class ServiceInstanceRelation extends Source {
     private String entityId;
@@ -50,29 +52,27 @@ public class ServiceInstanceRelation extends Source {
     }
 
     @Getter
-    @ScopeDefaultColumn.DefinedByField(columnName = "source_service_instance_id")
     private String sourceServiceInstanceId;
     @Getter
-    @ScopeDefaultColumn.DefinedByField(columnName = "source_service_id")
     private String sourceServiceId;
     @Getter
     @Setter
     @ScopeDefaultColumn.DefinedByField(columnName = "source_service_name", requireDynamicActive = true)
     private String sourceServiceName;
+    @Getter
     @Setter
-    private NodeType sourceServiceNodeType;
+    private Layer sourceServiceLayer;
     @Getter
     @Setter
     @ScopeDefaultColumn.DefinedByField(columnName = "source_service_instance_name", requireDynamicActive = true)
     private String sourceServiceInstanceName;
     @Getter
-    @ScopeDefaultColumn.DefinedByField(columnName = "dest_service_instance_id")
     private String destServiceInstanceId;
     @Getter
-    @ScopeDefaultColumn.DefinedByField(columnName = "dest_service_id")
     private String destServiceId;
+    @Getter
     @Setter
-    private NodeType destServiceNodeType;
+    private Layer destServiceLayer;
     @Getter
     @Setter
     @ScopeDefaultColumn.DefinedByField(columnName = "dest_service_name", requireDynamicActive = true)
@@ -95,19 +95,57 @@ public class ServiceInstanceRelation extends Source {
     private boolean status;
     @Getter
     @Setter
+    @Deprecated
     private int responseCode;
+    @Getter
+    @Setter
+    private int httpResponseStatusCode;
+    @Getter
+    @Setter
+    private String rpcStatusCode;
     @Getter
     @Setter
     private RequestType type;
     @Getter
     @Setter
     private DetectPoint detectPoint;
+    @Getter
+    @Setter
+    private String tlsMode;
+    @Getter
+    @Setter
+    private SideCar sideCar = new SideCar();
 
     @Override
     public void prepare() {
-        sourceServiceId = IDManager.ServiceID.buildId(sourceServiceName, sourceServiceNodeType);
-        destServiceId = IDManager.ServiceID.buildId(destServiceName, destServiceNodeType);
+        sourceServiceId = IDManager.ServiceID.buildId(sourceServiceName, sourceServiceLayer.isNormal());
+        destServiceId = IDManager.ServiceID.buildId(destServiceName, destServiceLayer.isNormal());
         sourceServiceInstanceId = IDManager.ServiceInstanceID.buildId(sourceServiceId, sourceServiceInstanceName);
         destServiceInstanceId = IDManager.ServiceInstanceID.buildId(destServiceId, destServiceInstanceName);
+    }
+
+    @Override
+    public String toJson() {
+        final JsonObject obj = new JsonObject();
+        obj.addProperty("scope", scope());
+        obj.addProperty("entityId", getEntityId());
+        obj.addProperty("timeBucket", getTimeBucket());
+        obj.addProperty("sourceServiceName", sourceServiceName);
+        obj.addProperty("sourceServiceLayer", sourceServiceLayer == null ? null : sourceServiceLayer.name());
+        obj.addProperty("sourceServiceInstanceName", sourceServiceInstanceName);
+        obj.addProperty("destServiceName", destServiceName);
+        obj.addProperty("destServiceLayer", destServiceLayer == null ? null : destServiceLayer.name());
+        obj.addProperty("destServiceInstanceName", destServiceInstanceName);
+        obj.addProperty("endpoint", endpoint);
+        obj.addProperty("componentId", componentId);
+        obj.addProperty("latency", latency);
+        obj.addProperty("status", status);
+        obj.addProperty("responseCode", responseCode);
+        obj.addProperty("httpResponseStatusCode", httpResponseStatusCode);
+        obj.addProperty("rpcStatusCode", rpcStatusCode);
+        obj.addProperty("type", type == null ? null : type.name());
+        obj.addProperty("detectPoint", detectPoint == null ? null : detectPoint.name());
+        obj.addProperty("tlsMode", tlsMode);
+        return obj.toString();
     }
 }

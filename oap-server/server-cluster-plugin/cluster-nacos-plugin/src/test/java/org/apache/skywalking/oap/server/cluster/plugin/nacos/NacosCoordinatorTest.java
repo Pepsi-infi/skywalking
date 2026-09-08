@@ -21,18 +21,23 @@ package org.apache.skywalking.oap.server.cluster.plugin.nacos;
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.naming.NamingService;
 import com.alibaba.nacos.api.naming.pojo.Instance;
+import org.apache.skywalking.oap.server.core.cluster.RemoteInstance;
+import org.apache.skywalking.oap.server.core.remote.client.Address;
+import org.apache.skywalking.oap.server.library.module.ModuleDefineHolder;
+import org.apache.skywalking.oap.server.telemetry.api.HealthCheckMetrics;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.apache.skywalking.oap.server.testing.util.ReflectUtil;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import org.apache.skywalking.oap.server.core.cluster.RemoteInstance;
-import org.apache.skywalking.oap.server.core.remote.client.Address;
-import org.junit.Before;
-import org.junit.Test;
-import org.mockito.ArgumentCaptor;
 
-import static org.junit.Assert.assertEquals;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.anyString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -41,16 +46,21 @@ public class NacosCoordinatorTest {
     private NamingService namingService = mock(NamingService.class);
     private ClusterModuleNacosConfig nacosConfig = new ClusterModuleNacosConfig();
     private NacosCoordinator coordinator;
-
+    private HealthCheckMetrics healthChecker = mock(HealthCheckMetrics.class);
     private Address remoteAddress = new Address("10.0.0.1", 1000, false);
     private Address selfRemoteAddress = new Address("10.0.0.2", 1001, true);
 
+    private Address internalAddress = new Address("10.0.0.3", 1002, false);
+
     private static final String SERVICE_NAME = "test-service";
 
-    @Before
+    @BeforeEach
     public void setUp() throws NacosException {
+        doNothing().when(healthChecker).health();
         nacosConfig.setServiceName(SERVICE_NAME);
-        coordinator = new NacosCoordinator(namingService, nacosConfig);
+        ModuleDefineHolder manager = mock(ModuleDefineHolder.class);
+        coordinator = new NacosCoordinator(manager, namingService, nacosConfig);
+        ReflectUtil.setInternalState(coordinator, "healthChecker", healthChecker);
     }
 
     @Test
@@ -93,10 +103,17 @@ public class NacosCoordinatorTest {
         registerRemote(selfRemoteAddress);
     }
 
-    private void validate(Address originArress, RemoteInstance instance) {
+    @Test
+    public void registerRemoteUsingInternal() throws NacosException {
+        nacosConfig.setInternalComHost(internalAddress.getHost());
+        nacosConfig.setInternalComPort(internalAddress.getPort());
+        registerRemote(internalAddress);
+    }
+
+    private void validate(Address originAddress, RemoteInstance instance) {
         Address instanceAddress = instance.getAddress();
-        assertEquals(originArress.getHost(), instanceAddress.getHost());
-        assertEquals(originArress.getPort(), instanceAddress.getPort());
+        assertEquals(originAddress.getHost(), instanceAddress.getHost());
+        assertEquals(originAddress.getPort(), instanceAddress.getPort());
     }
 
     private void registerRemote(Address address) throws NacosException {

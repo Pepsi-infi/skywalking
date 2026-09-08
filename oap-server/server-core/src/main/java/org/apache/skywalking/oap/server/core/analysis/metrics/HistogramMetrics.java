@@ -24,6 +24,7 @@ import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.Arg;
 import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.Entrance;
 import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.MetricsFunction;
 import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.SourceFrom;
+import org.apache.skywalking.oap.server.core.storage.annotation.BanyanDB;
 import org.apache.skywalking.oap.server.core.storage.annotation.Column;
 
 /**
@@ -41,7 +42,8 @@ public abstract class HistogramMetrics extends Metrics {
 
     @Getter
     @Setter
-    @Column(columnName = DATASET, dataType = Column.ValueDataType.HISTOGRAM, storageOnly = true, defaultValue = 0)
+    @Column(name = DATASET, dataType = Column.ValueDataType.HISTOGRAM, storageOnly = true, defaultValue = 0)
+    @BanyanDB.MeasureField
     private DataTable dataset = new DataTable(30);
 
     /**
@@ -75,9 +77,10 @@ public abstract class HistogramMetrics extends Metrics {
     }
 
     @Override
-    public void combine(Metrics metrics) {
+    public boolean combine(Metrics metrics) {
         HistogramMetrics histogramMetrics = (HistogramMetrics) metrics;
         this.dataset.append(histogramMetrics.dataset);
+        return true;
     }
 
     /**

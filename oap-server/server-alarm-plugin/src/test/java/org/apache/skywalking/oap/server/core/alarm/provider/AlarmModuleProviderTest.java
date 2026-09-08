@@ -23,21 +23,24 @@ import java.util.ServiceLoader;
 import org.apache.skywalking.oap.server.configuration.api.ConfigurationModule;
 import org.apache.skywalking.oap.server.core.CoreModule;
 import org.apache.skywalking.oap.server.core.alarm.AlarmModule;
+import org.apache.skywalking.oap.server.core.query.enumeration.Scope;
+import org.apache.skywalking.oap.server.core.storage.annotation.Column;
+import org.apache.skywalking.oap.server.core.storage.annotation.ValueColumnMetadata;
 import org.apache.skywalking.oap.server.library.module.ModuleProvider;
-import org.junit.Before;
-import org.junit.Test;
-import org.powermock.reflect.Whitebox;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.apache.skywalking.oap.server.testing.util.ReflectUtil;
 
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 public class AlarmModuleProviderTest {
 
     private AlarmModuleProvider moduleProvider;
 
-    @Before
+    @BeforeEach
     public void setUp() throws Exception {
         ServiceLoader<ModuleProvider> serviceLoader = ServiceLoader.load(ModuleProvider.class);
         Iterator<ModuleProvider> providerIterator = serviceLoader.iterator();
@@ -46,9 +49,13 @@ public class AlarmModuleProviderTest {
 
         moduleProvider = (AlarmModuleProvider) providerIterator.next();
 
-        moduleProvider.createConfigBeanIfAbsent();
+        moduleProvider.newConfigCreator();
 
         moduleProvider.prepare();
+        ValueColumnMetadata.INSTANCE.putIfAbsent(
+            "service_percent", "testColumn", Column.ValueDataType.COMMON_VALUE, 0, Scope.Service.getScopeId());
+        ValueColumnMetadata.INSTANCE.putIfAbsent(
+            "endpoint_percent", "testColumn", Column.ValueDataType.COMMON_VALUE, 0, Scope.Endpoint.getScopeId());
     }
 
     @Test
@@ -66,7 +73,7 @@ public class AlarmModuleProviderTest {
 
         NotifyHandler handler = mock(NotifyHandler.class);
 
-        Whitebox.setInternalState(moduleProvider, "notifyHandler", handler);
+        ReflectUtil.setInternalState(moduleProvider, "notifyHandler", handler);
         moduleProvider.notifyAfterCompleted();
     }
 

@@ -18,30 +18,39 @@
 
 package org.apache.skywalking.oap.server.core.analysis.manual.database;
 
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Objects;
+import lombok.Getter;
 import lombok.Setter;
 import org.apache.skywalking.oap.server.core.analysis.Stream;
 import org.apache.skywalking.oap.server.core.analysis.topn.TopN;
 import org.apache.skywalking.oap.server.core.analysis.worker.TopNStreamProcessor;
 import org.apache.skywalking.oap.server.core.source.DefaultScopeDefine;
-import org.apache.skywalking.oap.server.core.storage.StorageBuilder;
+import org.apache.skywalking.oap.server.core.storage.StorageID;
+import org.apache.skywalking.oap.server.core.storage.annotation.BanyanDB;
+import org.apache.skywalking.oap.server.core.storage.annotation.Column;
+import org.apache.skywalking.oap.server.core.storage.type.Convert2Entity;
+import org.apache.skywalking.oap.server.core.storage.type.Convert2Storage;
+import org.apache.skywalking.oap.server.core.storage.type.StorageBuilder;
 
 /**
  * Database TopN statement, including Database SQL statement, mongoDB and Redis commands.
  */
 @Stream(name = TopNDatabaseStatement.INDEX_NAME, scopeId = DefaultScopeDefine.DATABASE_SLOW_STATEMENT, builder = TopNDatabaseStatement.Builder.class, processor = TopNStreamProcessor.class)
+@BanyanDB.TimestampColumn(TopN.TIMESTAMP)
+@BanyanDB.Group(streamGroup = BanyanDB.StreamGroup.RECORDS)
 public class TopNDatabaseStatement extends TopN {
-
     public static final String INDEX_NAME = "top_n_database_statement";
 
     @Setter
     private String id;
+    @Getter
+    @Setter
+    @Column(name = STATEMENT, length = 2000, storageOnly = true)
+    private String statement;
 
     @Override
-    public String id() {
-        return id;
+    public StorageID id() {
+        return new StorageID().append(id);
     }
 
     @Override
@@ -51,36 +60,35 @@ public class TopNDatabaseStatement extends TopN {
         if (o == null || getClass() != o.getClass())
             return false;
         TopNDatabaseStatement statement = (TopNDatabaseStatement) o;
-        return getServiceId() == statement.getServiceId();
+        return Objects.equals(getEntityId(), statement.getEntityId());
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(getServiceId());
+        return Objects.hash(getEntityId());
     }
 
     public static class Builder implements StorageBuilder<TopNDatabaseStatement> {
-
         @Override
-        public TopNDatabaseStatement map2Data(Map<String, Object> dbMap) {
+        public TopNDatabaseStatement storage2Entity(final Convert2Entity converter) {
             TopNDatabaseStatement statement = new TopNDatabaseStatement();
-            statement.setStatement((String) dbMap.get(STATEMENT));
-            statement.setTraceId((String) dbMap.get(TRACE_ID));
-            statement.setLatency(((Number) dbMap.get(LATENCY)).longValue());
-            statement.setServiceId((String) dbMap.get(SERVICE_ID));
-            statement.setTimeBucket(((Number) dbMap.get(TIME_BUCKET)).longValue());
+            statement.setStatement((String) converter.get(STATEMENT));
+            statement.setTraceId((String) converter.get(TRACE_ID));
+            statement.setLatency(((Number) converter.get(LATENCY)).longValue());
+            statement.setEntityId((String) converter.get(ENTITY_ID));
+            statement.setTimeBucket(((Number) converter.get(TIME_BUCKET)).longValue());
+            statement.setTimestamp(((Number) converter.get(TIMESTAMP)).longValue());
             return statement;
         }
 
         @Override
-        public Map<String, Object> data2Map(TopNDatabaseStatement storageData) {
-            Map<String, Object> map = new HashMap<>();
-            map.put(STATEMENT, storageData.getStatement());
-            map.put(TRACE_ID, storageData.getTraceId());
-            map.put(LATENCY, storageData.getLatency());
-            map.put(SERVICE_ID, storageData.getServiceId());
-            map.put(TIME_BUCKET, storageData.getTimeBucket());
-            return map;
+        public void entity2Storage(final TopNDatabaseStatement storageData, final Convert2Storage converter) {
+            converter.accept(STATEMENT, storageData.getStatement());
+            converter.accept(TRACE_ID, storageData.getTraceId());
+            converter.accept(LATENCY, storageData.getLatency());
+            converter.accept(ENTITY_ID, storageData.getEntityId());
+            converter.accept(TIME_BUCKET, storageData.getTimeBucket());
+            converter.accept(TIMESTAMP, storageData.getTimestamp());
         }
     }
 }

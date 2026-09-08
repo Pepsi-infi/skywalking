@@ -104,24 +104,31 @@ public class TimeBucket {
     public static long getTimestamp(long timeBucket, DownSampling downsampling) {
         Calendar calendar = Calendar.getInstance();
         calendar.setTimeInMillis(0);
+        calendar.set(Calendar.MINUTE, 0);
+        calendar.set(Calendar.HOUR_OF_DAY, 0);
+
         switch (downsampling) {
             case Second:
                 calendar.set(Calendar.SECOND, (int) (timeBucket % 100));
                 timeBucket /= 100;
+                // Fall through
             case Minute:
                 calendar.set(Calendar.MINUTE, (int) (timeBucket % 100));
                 timeBucket /= 100;
+                // Fall through
             case Hour:
                 calendar.set(Calendar.HOUR_OF_DAY, (int) (timeBucket % 100));
                 timeBucket /= 100;
+                // Fall through
             case Day:
                 calendar.set(Calendar.DAY_OF_MONTH, (int) (timeBucket % 100));
                 timeBucket /= 100;
+                calendar.set(Calendar.MONTH, (int) (timeBucket % 100) - 1);
+                calendar.set(Calendar.YEAR, (int) (timeBucket / 100));
                 break;
             default:
                 throw new UnexpectedException("Unknown downsampling value.");
         }
-
         return calendar.getTimeInMillis();
     }
 
@@ -156,4 +163,33 @@ public class TimeBucket {
                 throw new UnexpectedException("Unknown downsampling value.");
         }
     }
+
+    /**
+     * Retain the minute time bucket to day time bucket. The format of timeBucket in minute format is "yyyyMMddHHmm", `HHmm` will be set to `0000`.
+     * minuteTimeBucket `202407112218` will be converted to `202407110000`.
+     * @param minuteTimeBucket minuteTimeBucket
+     * @return minute time bucket in day precision
+     */
+    public static long retainToDay4MinuteBucket(long minuteTimeBucket) {
+        if (isMinuteBucket(minuteTimeBucket)) {
+            return minuteTimeBucket / 10000 * 10000;
+        } else {
+            throw new UnexpectedException("Current time bucket is not a minute time bucket");
+        }
+    }
+
+    /**
+     * Retain the minute time bucket to day time bucket. The format of timeBucket in minute format is "yyyyMMddHHmm", `HHmm` will be set to `2359`.
+     * minuteTimeBucket `202407112218` will be converted to `202407112359`.
+     * @param minuteTimeBucket minuteTimeBucket
+     * @return minute time bucket in day precision
+     */
+    public static long retainToDayLastMin4MinuteBucket(long minuteTimeBucket) {
+        if (isMinuteBucket(minuteTimeBucket)) {
+            return minuteTimeBucket / 10000 * 10000 + 2359;
+        } else {
+            throw new UnexpectedException("Current time bucket is not a minute time bucket");
+        }
+    }
 }
+

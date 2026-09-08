@@ -18,96 +18,59 @@
 
 package org.apache.skywalking.oap.server.storage.plugin.jdbc.mysql;
 
-import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.SQLException;
+import com.google.gson.JsonObject;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.skywalking.oap.server.core.storage.StorageException;
-import org.apache.skywalking.oap.server.core.storage.model.ExtraQueryIndex;
-import org.apache.skywalking.oap.server.core.storage.model.Model;
 import org.apache.skywalking.oap.server.core.storage.model.ModelColumn;
 import org.apache.skywalking.oap.server.core.storage.type.StorageDataComplexObject;
 import org.apache.skywalking.oap.server.library.client.Client;
-import org.apache.skywalking.oap.server.library.client.jdbc.JDBCClientException;
-import org.apache.skywalking.oap.server.library.client.jdbc.hikaricp.JDBCHikariCPClient;
 import org.apache.skywalking.oap.server.library.module.ModuleManager;
-import org.apache.skywalking.oap.server.storage.plugin.jdbc.SQLBuilder;
-import org.apache.skywalking.oap.server.storage.plugin.jdbc.TableMetaInfo;
-import org.apache.skywalking.oap.server.storage.plugin.jdbc.h2.dao.H2TableInstaller;
+import org.apache.skywalking.oap.server.storage.plugin.jdbc.common.JDBCTableInstaller;
 
-/**
- * Extend H2TableInstaller but match MySQL SQL syntax.
- */
 @Slf4j
-public class MySQLTableInstaller extends H2TableInstaller {
-    public MySQLTableInstaller(ModuleManager moduleManager) {
-        super(moduleManager);
+public class MySQLTableInstaller extends JDBCTableInstaller {
+    /**
+     * The most raw bytes a MEDIUMTEXT column holds once a byte array is stored as Base64, four characters for
+     * every three bytes: 16,777,215 characters, rounded down to whole groups.
+     */
+    private static final int MEDIUMTEXT_RAW_BYTES = 16_777_215 / 4 * 3;
+
+    public MySQLTableInstaller(Client client, ModuleManager moduleManager) {
+        super(client, moduleManager);
+    }
+
+    @Override
+    public void start() {
         /*
          * Override column because the default column names in core have syntax conflict with MySQL.
          */
-        this.overrideColumnName("precision", "cal_precision");
-        this.overrideColumnName("match", "match_num");
+        overrideColumnName("value", "value_");
+        overrideColumnName("precision", "cal_precision");
+        overrideColumnName("match", "match_num");
     }
 
     @Override
-    protected boolean isExists(Client client, Model model) throws StorageException {
-        TableMetaInfo.addModel(model);
-        JDBCHikariCPClient h2Client = (JDBCHikariCPClient) client;
-        try (Connection conn = h2Client.getConnection()) {
-            try (ResultSet rset = conn.getMetaData().getTables(null, null, model.getName(), null)) {
-                if (rset.next()) {
-                    return true;
-                }
+    public String getColumnDefinition(final ModelColumn column) {
+        final var storageName = column.getColumnName().getStorageName();
+        final var type = column.getType();
+        if (StorageDataComplexObject.class.isAssignableFrom(type)) {
+            return storageName + " MEDIUMTEXT";
+        } else if (String.class.equals(type)) {
+            if (column.getLength() > 16383) {
+                return storageName + " MEDIUMTEXT";
+            } else {
+                return storageName + " VARCHAR(" + column.getLength() + ")";
             }
-        } catch (SQLException | JDBCClientException e) {
-            throw new StorageException(e.getMessage(), e);
-        }
-        return false;
-    }
-
-    @Override
-    protected void createTableIndexes(JDBCHikariCPClient client,
-                                      Connection connection,
-                                      Model model) throws JDBCClientException {
-        int indexSeq = 0;
-        for (final ModelColumn modelColumn : model.getColumns()) {
-            if (!modelColumn.isStorageOnly()) {
-                SQLBuilder tableIndexSQL = new SQLBuilder("CREATE INDEX ");
-                tableIndexSQL.append(model.getName().toUpperCase())
-                             .append("_")
-                             .append(String.valueOf(indexSeq++))
-                             .append("_IDX ");
-                tableIndexSQL.append("ON ").append(model.getName()).append("(")
-                             .append(modelColumn.getColumnName().getStorageName())
-                             .append(")");
-                createIndex(client, connection, model, tableIndexSQL);
+        } else if (JsonObject.class.equals(type)) {
+            if (column.getLength() > 16383) {
+                return storageName + " MEDIUMTEXT";
+            } else {
+                return storageName + " VARCHAR(" + column.getLength() + ")";
             }
+        } else if (byte[].class.equals(type)) {
+            // the length of a byte array column is the most raw bytes it must hold; MEDIUMTEXT holds fewer than
+            // its character count once they are Base64
+            return storageName + (column.getLength() > MEDIUMTEXT_RAW_BYTES ? " LONGTEXT" : " MEDIUMTEXT");
         }
-
-        for (final ExtraQueryIndex extraQueryIndex : model.getExtraQueryIndices()) {
-            SQLBuilder tableIndexSQL = new SQLBuilder("CREATE INDEX ");
-            tableIndexSQL.append(model.getName().toUpperCase())
-                         .append("_")
-                         .append(String.valueOf(indexSeq++))
-                         .append("_IDX ");
-            tableIndexSQL.append(" ON ").append(model.getName()).append("(");
-            final String[] columns = extraQueryIndex.getColumns();
-            for (int i = 0; i < columns.length; i++) {
-                tableIndexSQL.append(columns[i]);
-                if (i < columns.length - 1) {
-                    tableIndexSQL.append(",");
-                }
-            }
-            tableIndexSQL.append(")");
-            createIndex(client, connection, model, tableIndexSQL);
-        }
-    }
-
-    @Override
-    protected String getColumnType(final ModelColumn column) {
-        if (StorageDataComplexObject.class.isAssignableFrom(column.getType())) {
-            return "MEDIUMTEXT";
-        }
-        return super.getColumnType(column);
+        return super.getColumnDefinition(column);
     }
 }

@@ -18,14 +18,16 @@
 
 package org.apache.skywalking.oap.server.core.analysis.metrics;
 
+import com.google.gson.JsonObject;
 import lombok.Getter;
 import lombok.Setter;
 import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.ConstOne;
 import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.Entrance;
 import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.MetricsFunction;
 import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.SourceFrom;
-import org.apache.skywalking.oap.server.core.query.sql.Function;
+import org.apache.skywalking.oap.server.core.storage.annotation.BanyanDB;
 import org.apache.skywalking.oap.server.core.storage.annotation.Column;
+import org.apache.skywalking.oap.server.core.storage.annotation.ElasticSearch;
 
 @MetricsFunction(functionName = "longAvg")
 public abstract class LongAvgMetrics extends Metrics implements LongValueHolder {
@@ -36,15 +38,19 @@ public abstract class LongAvgMetrics extends Metrics implements LongValueHolder 
 
     @Getter
     @Setter
-    @Column(columnName = SUMMATION, storageOnly = true)
+    @Column(name = SUMMATION, storageOnly = true)
+    @BanyanDB.MeasureField
     protected long summation;
     @Getter
     @Setter
-    @Column(columnName = COUNT, storageOnly = true)
+    @Column(name = COUNT, storageOnly = true)
+    @BanyanDB.MeasureField
     protected long count;
     @Getter
     @Setter
-    @Column(columnName = VALUE, dataType = Column.ValueDataType.COMMON_VALUE, function = Function.Avg)
+    @ElasticSearch.EnableDocValues
+    @Column(name = VALUE, dataType = Column.ValueDataType.COMMON_VALUE)
+    @BanyanDB.MeasureField
     private long value;
 
     @Entrance
@@ -54,13 +60,21 @@ public abstract class LongAvgMetrics extends Metrics implements LongValueHolder 
     }
 
     @Override
-    public final void combine(Metrics metrics) {
+    public final boolean combine(Metrics metrics) {
         LongAvgMetrics longAvgMetrics = (LongAvgMetrics) metrics;
         combine(longAvgMetrics.summation, longAvgMetrics.count);
+        return true;
     }
 
     @Override
     public final void calculate() {
         this.value = this.summation / this.count;
+    }
+
+    @Override
+    protected void appendDebugFields(final JsonObject obj) {
+        obj.addProperty("summation", summation);
+        obj.addProperty("count", count);
+        obj.addProperty("value", value);
     }
 }

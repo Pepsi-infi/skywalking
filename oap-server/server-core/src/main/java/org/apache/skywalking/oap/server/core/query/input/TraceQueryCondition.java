@@ -18,19 +18,22 @@
 
 package org.apache.skywalking.oap.server.core.query.input;
 
+import java.util.List;
 import lombok.Getter;
 import lombok.Setter;
+import lombok.ToString;
+import org.apache.skywalking.oap.server.core.analysis.manual.searchtag.Tag;
 import org.apache.skywalking.oap.server.core.query.type.Pagination;
 import org.apache.skywalking.oap.server.core.query.type.QueryOrder;
 import org.apache.skywalking.oap.server.core.query.type.TraceState;
 
 @Getter
 @Setter
+@ToString
 public class TraceQueryCondition {
     private String serviceId;
     private String serviceInstanceId;
     private String traceId;
-    private String endpointName;
     private String endpointId;
     private Duration queryDuration;
     private int minTraceDuration;
@@ -38,4 +41,5 @@ public class TraceQueryCondition {
     private TraceState traceState;
     private QueryOrder queryOrder;
     private Pagination paging;
+    private List<Tag> tags;
 }

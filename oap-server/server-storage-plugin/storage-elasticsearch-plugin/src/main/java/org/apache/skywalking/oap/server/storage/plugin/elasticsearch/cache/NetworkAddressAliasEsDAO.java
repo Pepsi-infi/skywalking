@@ -18,47 +18,63 @@
 
 package org.apache.skywalking.oap.server.storage.plugin.elasticsearch.cache;
 
-import java.util.ArrayList;
-import java.util.List;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.skywalking.library.elasticsearch.requests.search.BoolQueryBuilder;
+import org.apache.skywalking.library.elasticsearch.requests.search.Query;
+import org.apache.skywalking.library.elasticsearch.requests.search.Search;
 import org.apache.skywalking.oap.server.core.analysis.manual.networkalias.NetworkAddressAlias;
 import org.apache.skywalking.oap.server.core.storage.cache.INetworkAddressAliasDAO;
 import org.apache.skywalking.oap.server.library.client.elasticsearch.ElasticSearchClient;
+import org.apache.skywalking.oap.server.library.client.elasticsearch.ElasticSearchScroller;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.StorageModuleElasticsearchConfig;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.ElasticSearchConverter;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.EsDAO;
-import org.elasticsearch.action.search.SearchResponse;
-import org.elasticsearch.index.query.QueryBuilders;
-import org.elasticsearch.search.SearchHit;
-import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.IndexController;
+
+import java.util.Collections;
+import java.util.List;
 
 @Slf4j
 public class NetworkAddressAliasEsDAO extends EsDAO implements INetworkAddressAliasDAO {
     protected final int resultWindowMaxSize;
+    protected final int scrollingBatchSize;
 
-    public NetworkAddressAliasEsDAO(ElasticSearchClient client, int resultWindowMaxSize) {
+    public NetworkAddressAliasEsDAO(ElasticSearchClient client,
+                                    StorageModuleElasticsearchConfig config) {
         super(client);
-        this.resultWindowMaxSize = resultWindowMaxSize;
+        this.resultWindowMaxSize = config.getResultWindowMaxSize();
+        this.scrollingBatchSize = config.getScrollingBatchSize();
     }
 
     @Override
     public List<NetworkAddressAlias> loadLastUpdate(long timeBucketInMinute) {
-        List<NetworkAddressAlias> networkAddressAliases = new ArrayList<>();
-
+        final String index =
+            IndexController.LogicIndicesRegister.getPhysicalTableName(NetworkAddressAlias.INDEX_NAME);
         try {
-            SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder();
-            searchSourceBuilder.query(QueryBuilders.rangeQuery(NetworkAddressAlias.LAST_UPDATE_TIME_BUCKET)
-                                                   .gte(timeBucketInMinute));
-            searchSourceBuilder.size(resultWindowMaxSize);
-
-            SearchResponse response = getClient().search(NetworkAddressAlias.INDEX_NAME, searchSourceBuilder);
-
-            final NetworkAddressAlias.Builder builder = new NetworkAddressAlias.Builder();
-            for (SearchHit searchHit : response.getHits().getHits()) {
-                networkAddressAliases.add(builder.map2Data(searchHit.getSourceAsMap()));
+            final int batchSize = Math.min(resultWindowMaxSize, scrollingBatchSize);
+            final BoolQueryBuilder query = Query.bool();
+            if (IndexController.LogicIndicesRegister.isMergedTable(NetworkAddressAlias.INDEX_NAME)) {
+                query.must(Query.term(IndexController.LogicIndicesRegister.METRIC_TABLE_NAME, NetworkAddressAlias.INDEX_NAME));
             }
+            query.must(Query.range(NetworkAddressAlias.LAST_UPDATE_TIME_BUCKET)
+                             .gte(timeBucketInMinute));
+
+            final var search = Search.builder().query(query).size(batchSize).build();
+            final var builder = new NetworkAddressAlias.Builder();
+
+            final var scroller = ElasticSearchScroller
+                .<NetworkAddressAlias>builder()
+                .client(getClient())
+                .search(search)
+                .index(index)
+                .queryMaxSize(resultWindowMaxSize)
+                .resultConverter(searchHit -> builder.storage2Entity(
+                    new ElasticSearchConverter.ToEntity(NetworkAddressAlias.INDEX_NAME, searchHit.getSource())))
+                .build();
+            return scroller.scroll();
         } catch (Throwable t) {
             log.error(t.getMessage(), t);
+            return Collections.emptyList();
         }
-
-        return networkAddressAliases;
     }
 }

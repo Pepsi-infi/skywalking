@@ -18,13 +18,18 @@
 
 package org.apache.skywalking.oap.server.core.query.type;
 
+import lombok.AllArgsConstructor;
 import lombok.Getter;
+import lombok.NoArgsConstructor;
 import lombok.Setter;
+import lombok.ToString;
 
 @Getter
 @Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@ToString
 public class Pagination {
     private int pageNum;
     private int pageSize;
-    private boolean needTotal;
 }

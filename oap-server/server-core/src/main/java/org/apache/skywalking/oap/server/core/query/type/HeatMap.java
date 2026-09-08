@@ -18,12 +18,14 @@
 
 package org.apache.skywalking.oap.server.core.query.type;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.skywalking.oap.server.core.analysis.metrics.DataTable;
 
 /**
@@ -34,7 +36,7 @@ import org.apache.skywalking.oap.server.core.analysis.metrics.DataTable;
 @Getter
 public class HeatMap {
     private List<HeatMapColumn> values = new ArrayList<>(10);
-    private List<Bucket> buckets = null;
+    private List<Bucket> buckets = new ArrayList<>();
 
     public void addBucket(Bucket bucket) {
         this.buckets.add(bucket);
@@ -50,8 +52,7 @@ public class HeatMap {
         DataTable dataset = new DataTable(rawdata);
 
         final List<String> sortedKeys = dataset.sortedKeys(new KeyComparator(true));
-        if (buckets == null) {
-            buckets = new ArrayList<>(dataset.size());
+        if (buckets.isEmpty()) {
             for (int i = 0; i < sortedKeys.size(); i++) {
                 final Bucket bucket = new Bucket();
                 final String minValue = sortedKeys.get(i);
@@ -133,9 +134,16 @@ public class HeatMap {
         private final boolean asc;
 
         @Override
-        public int compare(final String key1, final String key2) {
+        public int compare(final String k1, final String k2) {
             int result;
-
+            String[] kk1 = parseKey(k1);
+            String[] kk2 = parseKey(k2);
+            result = kk1[0].compareTo(kk2[0]);
+            if (result != 0) {
+                return result;
+            }
+            final String key1 = kk1[1];
+            final String key2 = kk2[1];
             if (key1.equals(key2)) {
                 result = 0;
             } else if (Bucket.INFINITE_NEGATIVE.equals(key1) || Bucket.INFINITE_POSITIVE.equals(key2)) {
@@ -143,10 +151,21 @@ public class HeatMap {
             } else if (Bucket.INFINITE_NEGATIVE.equals(key2) || Bucket.INFINITE_POSITIVE.equals(key1)) {
                 result = 1;
             } else {
-                result = Integer.parseInt(key1) - Integer.parseInt(key2);
+                result = new BigInteger(key1).subtract(new BigInteger(key2)).signum();
             }
 
-            return asc ? result : 0 - result;
+            return asc ? result : -result;
+        }
+
+        private String[] parseKey(String key) {
+            if (key.contains(":")) {
+                // split the group and bucket
+                return new String[] {
+                    StringUtils.substringBeforeLast(key, ":"),
+                    StringUtils.substringAfterLast(key, ":"),
+                };
+            }
+            return new String[] {"default", key};
         }
     }
 }

@@ -19,17 +19,26 @@
 package org.apache.skywalking.oap.server.core.query;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.List;
+import java.util.OptionalDouble;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.skywalking.oap.server.core.query.input.Duration;
 import org.apache.skywalking.oap.server.core.query.input.MetricsCondition;
 import org.apache.skywalking.oap.server.core.query.type.HeatMap;
+import org.apache.skywalking.oap.server.core.query.type.KVInt;
+import org.apache.skywalking.oap.server.core.query.type.KeyValue;
 import org.apache.skywalking.oap.server.core.query.type.MetricsValues;
+import org.apache.skywalking.oap.server.core.query.type.NullableValue;
+import org.apache.skywalking.oap.server.core.query.type.debugging.DebuggingSpan;
+import org.apache.skywalking.oap.server.core.query.type.debugging.DebuggingTraceContext;
 import org.apache.skywalking.oap.server.core.storage.StorageModule;
 import org.apache.skywalking.oap.server.core.storage.annotation.ValueColumnMetadata;
 import org.apache.skywalking.oap.server.core.storage.query.IMetricsQueryDAO;
 import org.apache.skywalking.oap.server.library.module.ModuleManager;
 import org.apache.skywalking.oap.server.library.module.Service;
+
+import static org.apache.skywalking.oap.server.core.query.type.debugging.DebuggingTraceContext.TRACE_CONTEXT;
 
 @Slf4j
 public class MetricsQueryService implements Service {
@@ -48,10 +57,30 @@ public class MetricsQueryService implements Service {
     }
 
     /**
-     * Read metrics single value in the duration of required metrics
+     * Read metrics average value in the duration of required metrics
      */
-    public int readMetricsValue(MetricsCondition condition, Duration duration) throws IOException {
-        return getMetricQueryDAO().readMetricsValue(
+    public NullableValue readMetricsValue(MetricsCondition condition, Duration duration) throws IOException {
+        long defaultValue = ValueColumnMetadata.INSTANCE.getDefaultValue(condition.getName());
+        if (!condition.senseScope() || !condition.getEntity().isValid()) {
+            return new NullableValue(defaultValue, true);
+        }
+        MetricsValues metricsValues = readMetricsValues(condition, duration);
+        if (!metricsValues.getValues().getValues().isEmpty()) {
+           OptionalDouble avgValue = metricsValues.getValues().getValues().stream().filter(v -> !v.isEmptyValue()).mapToLong(
+               KVInt::getValue).average();
+           if (avgValue.isPresent()) {
+               return new NullableValue((long) avgValue.getAsDouble(), false);
+           }
+        }
+
+        return new NullableValue(defaultValue, true);
+    }
+
+    private MetricsValues invokeReadMetricsValues(MetricsCondition condition, Duration duration) throws IOException {
+        if (!condition.senseScope() || !condition.getEntity().isValid()) {
+            return new MetricsValues();
+        }
+        return getMetricQueryDAO().readMetricsValuesDebuggable(
             condition, ValueColumnMetadata.INSTANCE.getValueCName(condition.getName()), duration);
     }
 
@@ -59,8 +88,29 @@ public class MetricsQueryService implements Service {
      * Read time-series values in the duration of required metrics
      */
     public MetricsValues readMetricsValues(MetricsCondition condition, Duration duration) throws IOException {
-        return getMetricQueryDAO().readMetricsValues(
-            condition, ValueColumnMetadata.INSTANCE.getValueCName(condition.getName()), duration);
+        DebuggingTraceContext traceContext = TRACE_CONTEXT.get();
+        DebuggingSpan span = null;
+        try {
+            if (traceContext != null) {
+                span = traceContext.createSpan("Query Service: readMetricsValues");
+                span.setMsg("MetricsCondition: " + condition + ", Duration: " + duration);
+            }
+            return invokeReadMetricsValues(condition, duration);
+        } finally {
+            if (traceContext != null && span != null) {
+                traceContext.stopSpan(span);
+            }
+        }
+    }
+
+    private List<MetricsValues> invokeReadLabeledMetricsValues(MetricsCondition condition,
+                                                        List<KeyValue> labels,
+                                                        Duration duration) throws IOException {
+        if (!condition.senseScope() || !condition.getEntity().isValid()) {
+            return Collections.emptyList();
+        }
+        return getMetricQueryDAO().readLabeledMetricsValuesDebuggable(
+            condition, ValueColumnMetadata.INSTANCE.getValueCName(condition.getName()), labels, duration);
     }
 
     /**
@@ -69,16 +119,36 @@ public class MetricsQueryService implements Service {
      * @param labels the labels you need to query.
      */
     public List<MetricsValues> readLabeledMetricsValues(MetricsCondition condition,
-                                                        List<String> labels,
-                                                        Duration duration) throws IOException {
-        return getMetricQueryDAO().readLabeledMetricsValues(
-            condition, ValueColumnMetadata.INSTANCE.getValueCName(condition.getName()), labels, duration);
+                                                         List<KeyValue> labels,
+                                                         Duration duration) throws IOException {
+        DebuggingTraceContext traceContext = TRACE_CONTEXT.get();
+        DebuggingSpan span = null;
+        try {
+            if (traceContext != null) {
+                span = traceContext.createSpan("Query Service: readLabeledMetricsValues");
+                span.setMsg("MetricsCondition: " + condition + ", Labels: " + labels + ", Duration: " + duration);
+            }
+            return invokeReadLabeledMetricsValues(condition, labels, duration);
+        } finally {
+            if (traceContext != null && span != null) {
+                traceContext.stopSpan(span);
+            }
+        }
+    }
+
+    public List<MetricsValues> readLabeledMetricsValuesWithoutEntity(String metricsName,
+                                         List<KeyValue> labels,
+                                         Duration duration) throws IOException {
+        return getMetricQueryDAO().readLabeledMetricsValuesWithoutEntity(metricsName, ValueColumnMetadata.INSTANCE.getValueCName(metricsName), labels, duration);
     }
 
     /**
      * Heatmap is bucket based value statistic result.
      */
     public HeatMap readHeatMap(MetricsCondition condition, Duration duration) throws IOException {
+        if (!condition.senseScope() || !condition.getEntity().isValid()) {
+            return new HeatMap();
+        }
         return getMetricQueryDAO().readHeatMap(
             condition, ValueColumnMetadata.INSTANCE.getValueCName(condition.getName()), duration);
     }

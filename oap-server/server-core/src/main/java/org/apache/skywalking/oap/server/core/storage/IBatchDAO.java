@@ -19,29 +19,40 @@
 package org.apache.skywalking.oap.server.core.storage;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import org.apache.skywalking.oap.server.library.client.request.InsertRequest;
 import org.apache.skywalking.oap.server.library.client.request.PrepareRequest;
 
 /**
- * IBatchDAO provides two modes of data persistence supported by most databases, including synchronous and
- * asynchronous.
+ * IBatchDAO provides two modes of data persistence supported by most databases, including pure insert and batch hybrid
+ * insert/update.
  */
 public interface IBatchDAO extends DAO {
     /**
      * Push data into the database in async mode. This method is driven by streaming process. This method doesn't
      * request the data queryable immediately after the method finished.
      *
-     * All data are in the additional mode, no modification.
-     *
      * @param insertRequest data to insert.
      */
-    void asynchronous(InsertRequest insertRequest);
+    void insert(InsertRequest insertRequest);
 
     /**
-     * Make all given PrepareRequest efficient in the sync mode. All requests could be confirmed by the database. All
-     * changes are required queryable after method returns.
+     * Push data collection into the database in async mode. This method is driven by streaming process. This method
+     * doesn't request the data queryable immediately after the method finished.
+     *
+     * The method requires thread safe. The OAP core would call this concurrently.
      *
      * @param prepareRequests data to insert or update. No delete happens in streaming mode.
      */
-    void synchronous(List<PrepareRequest> prepareRequests);
+    CompletableFuture<Void> flush(List<PrepareRequest> prepareRequests);
+
+    /**
+     * End of flush is an event to notify the whole flush period is ending.
+     * This provides a time point to do clean up works.
+     *
+     * @since 9.2.0
+     */
+    default void endOfFlush() {
+
+    }
 }

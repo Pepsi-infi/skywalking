@@ -19,56 +19,57 @@
 package org.apache.skywalking.oap.server.core.remote.client;
 
 import io.grpc.ManagedChannel;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import io.netty.handler.ssl.SslContext;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.apache.skywalking.apm.commons.datacarrier.DataCarrier;
-import org.apache.skywalking.apm.commons.datacarrier.consumer.IConsumer;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.skywalking.oap.server.core.remote.data.StreamData;
 import org.apache.skywalking.oap.server.core.remote.grpc.proto.Empty;
 import org.apache.skywalking.oap.server.core.remote.grpc.proto.RemoteMessage;
 import org.apache.skywalking.oap.server.core.remote.grpc.proto.RemoteServiceGrpc;
+import org.apache.skywalking.oap.server.library.batchqueue.BatchQueue;
+import org.apache.skywalking.oap.server.library.batchqueue.BatchQueueConfig;
+import org.apache.skywalking.oap.server.library.batchqueue.BatchQueueManager;
+import org.apache.skywalking.oap.server.library.batchqueue.BufferStrategy;
+import org.apache.skywalking.oap.server.library.batchqueue.HandlerConsumer;
+import org.apache.skywalking.oap.server.library.batchqueue.ThreadPolicy;
 import org.apache.skywalking.oap.server.library.client.grpc.GRPCClient;
 import org.apache.skywalking.oap.server.library.module.ModuleDefineHolder;
 import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
 import org.apache.skywalking.oap.server.telemetry.api.CounterMetrics;
 import org.apache.skywalking.oap.server.telemetry.api.MetricsCreator;
 import org.apache.skywalking.oap.server.telemetry.api.MetricsTag;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * This is a wrapper of the gRPC client for sending message to each other OAP server. It contains a block queue to
  * buffering the message and sending the message by batch.
  */
+@Slf4j
 public class GRPCRemoteClient implements RemoteClient {
-
-    private static final Logger logger = LoggerFactory.getLogger(GRPCRemoteClient.class);
-
-    private final int channelSize;
     private final int bufferSize;
     private final Address address;
     private final AtomicInteger concurrentStreamObserverNumber = new AtomicInteger(0);
     private SslContext sslContext;
     private GRPCClient client;
-    private DataCarrier<RemoteMessage> carrier;
+    private BatchQueue<RemoteMessage> queue;
+    private String queueName;
     private boolean isConnect;
     private CounterMetrics remoteOutCounter;
     private CounterMetrics remoteOutErrorCounter;
     private int remoteTimeout;
+    private long lastRemoteResourceExhaustedTime = 0;
 
     public GRPCRemoteClient(final ModuleDefineHolder moduleDefineHolder,
                             final Address address,
-                            final int channelSize,
                             final int bufferSize,
                             final int remoteTimeout,
                             final SslContext sslContext) {
 
         this.address = address;
-        this.channelSize = channelSize;
         this.bufferSize = bufferSize;
         this.remoteTimeout = remoteTimeout;
         this.sslContext = sslContext;
@@ -76,20 +77,42 @@ public class GRPCRemoteClient implements RemoteClient {
         remoteOutCounter = moduleDefineHolder.find(TelemetryModule.NAME)
                                              .provider()
                                              .getService(MetricsCreator.class)
-                                             .createCounter("remote_out_count", "The number(client side) of inside remote inside aggregate rpc.", new MetricsTag.Keys("dest", "self"), new MetricsTag.Values(address
-                                                                                                                                                                                                                 .toString(), "N"));
+                                             .createCounter(
+                                                 "remote_out_count",
+                                                 "The number(client side) of inside remote inside aggregate rpc.",
+                                                 new MetricsTag.Keys("dest", "self"), new MetricsTag.Values(
+                                                     address
+                                                         .toString(), "N"
+                                                 )
+                                             );
         remoteOutErrorCounter = moduleDefineHolder.find(TelemetryModule.NAME)
                                                   .provider()
                                                   .getService(MetricsCreator.class)
-                                                  .createCounter("remote_out_error_count", "The error number(client side) of inside remote inside aggregate rpc.", new MetricsTag.Keys("dest", "self"), new MetricsTag.Values(address
-                                                                                                                                                                                                                                  .toString(), "N"));
+                                                  .createCounter(
+                                                      "remote_out_error_count",
+                                                      "The error number(client side) of inside remote inside aggregate rpc.",
+                                                      new MetricsTag.Keys("dest", "self"), new MetricsTag.Values(
+                                                          address
+                                                              .toString(), "N"
+                                                      )
+                                                  );
     }
 
     @Override
     public void connect() {
         if (!isConnect) {
             this.getClient().connect();
-            this.getDataCarrier().consume(new RemoteMessageConsumer(), 1);
+            this.queueName = "GRPC_REMOTE_" + address.getHost() + "_" + address.getPort();
+            final BatchQueueConfig<RemoteMessage> config = BatchQueueConfig.<RemoteMessage>builder()
+                .threads(ThreadPolicy.fixed(1))
+                .bufferSize(bufferSize)
+                .strategy(BufferStrategy.BLOCKING)
+                .consumer(new RemoteMessageConsumer())
+                .minIdleMs(10)
+                .maxIdleMs(100)
+                .build();
+
+            this.queue = BatchQueueManager.create(queueName, config);
             this.isConnect = true;
         }
     }
@@ -99,7 +122,8 @@ public class GRPCRemoteClient implements RemoteClient {
      *
      * @return a channel when the state to be ready
      */
-    ManagedChannel getChannel() {
+    @Override
+    public ManagedChannel getChannel() {
         return getClient().getChannel();
     }
 
@@ -118,17 +142,6 @@ public class GRPCRemoteClient implements RemoteClient {
         return RemoteServiceGrpc.newStub(getChannel());
     }
 
-    DataCarrier<RemoteMessage> getDataCarrier() {
-        if (Objects.isNull(this.carrier)) {
-            synchronized (GRPCRemoteClient.class) {
-                if (Objects.isNull(this.carrier)) {
-                    this.carrier = new DataCarrier<>("GRPCRemoteClient", channelSize, bufferSize);
-                }
-            }
-        }
-        return this.carrier;
-    }
-
     /**
      * Push stream data which need to send to another OAP server.
      *
@@ -141,14 +154,10 @@ public class GRPCRemoteClient implements RemoteClient {
         builder.setNextWorkerName(nextWorkerName);
         builder.setRemoteData(streamData.serialize());
 
-        this.getDataCarrier().produce(builder.build());
+        this.queue.produce(builder.build());
     }
 
-    class RemoteMessageConsumer implements IConsumer<RemoteMessage> {
-        @Override
-        public void init() {
-        }
-
+    class RemoteMessageConsumer implements HandlerConsumer<RemoteMessage> {
         @Override
         public void consume(List<RemoteMessage> remoteMessages) {
             try {
@@ -160,17 +169,8 @@ public class GRPCRemoteClient implements RemoteClient {
                 streamObserver.onCompleted();
             } catch (Throwable t) {
                 remoteOutErrorCounter.inc();
-                logger.error(t.getMessage(), t);
+                log.error(t.getMessage(), t);
             }
-        }
-
-        @Override
-        public void onError(List<RemoteMessage> remoteMessages, Throwable t) {
-            logger.error(t.getMessage(), t);
-        }
-
-        @Override
-        public void onExit() {
         }
     }
 
@@ -183,44 +183,68 @@ public class GRPCRemoteClient implements RemoteClient {
     private StreamObserver<RemoteMessage> createStreamObserver() {
         int sleepTotalMillis = 0;
         int sleepMillis = 10;
-        while (concurrentStreamObserverNumber.incrementAndGet() > 10) {
-            concurrentStreamObserverNumber.addAndGet(-1);
 
+        // Control the concurrency of gRPC streaming stub.
+        // If over 10 created and not finished/error, this blocks the method.
+        while (concurrentStreamObserverNumber.get() > 10) {
             try {
                 Thread.sleep(sleepMillis);
             } catch (InterruptedException e) {
-                logger.error(e.getMessage(), e);
+                log.error(e.getMessage(), e);
             }
 
             sleepTotalMillis += sleepMillis;
 
             if (sleepTotalMillis > 60000) {
-                logger.warn("Remote client block times over 60 seconds.");
+                log.warn(
+                    "Remote client [{}] block times over 60 seconds. Current streaming number {}",
+                    address, concurrentStreamObserverNumber.get()
+                );
+                // Reset sleepTotalMillis to avoid too many warn logs.
+                sleepTotalMillis = 0;
             }
         }
 
-        return getStub().withDeadlineAfter(remoteTimeout, TimeUnit.SECONDS).call(new StreamObserver<Empty>() {
-            @Override
-            public void onNext(Empty empty) {
-            }
+        final StreamObserver<RemoteMessage> remoteMessageStreamObserver
+            = getStub().withDeadlineAfter(remoteTimeout, TimeUnit.SECONDS)
+                       .call(new StreamObserver<Empty>() {
+                           @Override
+                           public void onNext(Empty empty) {
+                           }
 
-            @Override
-            public void onError(Throwable throwable) {
-                concurrentStreamObserverNumber.addAndGet(-1);
-                logger.error(throwable.getMessage(), throwable);
-            }
+                           @Override
+                           public void onError(Throwable throwable) {
+                               concurrentStreamObserverNumber.addAndGet(-1);
+                               Status status = Status.fromThrowable(throwable);
+                               if (Status.CANCELLED.getCode() == status.getCode()) {
+                                   if (log.isDebugEnabled()) {
+                                       log.debug(throwable.getMessage(), throwable);
+                                   }
+                                   return;
+                               } else if (Status.RESOURCE_EXHAUSTED.getCode() == status.getCode()) {
+                                   if (System.currentTimeMillis() - lastRemoteResourceExhaustedTime > 120_000) {
+                                       // Only output the log every 120 seconds.
+                                       log.warn(throwable.getMessage(), throwable);
+                                       lastRemoteResourceExhaustedTime = System.currentTimeMillis();
+                                   }
+                                   return;
+                               }
+                               log.error(throwable.getMessage(), throwable);
+                           }
 
-            @Override
-            public void onCompleted() {
-                concurrentStreamObserverNumber.addAndGet(-1);
-            }
-        });
+                           @Override
+                           public void onCompleted() {
+                               concurrentStreamObserverNumber.addAndGet(-1);
+                           }
+                       });
+        concurrentStreamObserverNumber.incrementAndGet();
+        return remoteMessageStreamObserver;
     }
 
     @Override
     public void close() {
-        if (Objects.nonNull(this.carrier)) {
-            this.carrier.shutdownConsumers();
+        if (queueName != null) {
+            BatchQueueManager.shutdown(queueName);
         }
         if (Objects.nonNull(this.client)) {
             this.client.shutdown();

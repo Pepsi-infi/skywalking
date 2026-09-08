@@ -23,10 +23,10 @@ import com.google.common.reflect.ClassPath;
 import java.io.IOException;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import javassist.CannotCompileException;
 import javassist.ClassPool;
 import javassist.CtClass;
@@ -34,19 +34,26 @@ import javassist.CtConstructor;
 import javassist.CtNewConstructor;
 import javassist.CtNewMethod;
 import javassist.NotFoundException;
-import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.JavaVersion;
+import org.apache.commons.lang3.SystemUtils;
 import org.apache.skywalking.oap.server.core.UnexpectedException;
 import org.apache.skywalking.oap.server.core.analysis.StreamDefinition;
 import org.apache.skywalking.oap.server.core.analysis.TimeBucket;
+import org.apache.skywalking.oap.server.core.analysis.meter.dynamic.MeterClassPackageHolder;
 import org.apache.skywalking.oap.server.core.analysis.meter.function.AcceptableValue;
 import org.apache.skywalking.oap.server.core.analysis.meter.function.MeterFunction;
 import org.apache.skywalking.oap.server.core.analysis.metrics.Metrics;
 import org.apache.skywalking.oap.server.core.analysis.worker.MetricsStreamProcessor;
+import org.apache.skywalking.oap.server.core.storage.StorageException;
+import org.apache.skywalking.oap.server.core.storage.model.ModelRegistry;
+import org.apache.skywalking.oap.server.core.storage.model.StorageManipulationOpt;
+import org.apache.skywalking.oap.server.core.CoreModule;
 import org.apache.skywalking.oap.server.library.module.ModuleManager;
 import org.apache.skywalking.oap.server.library.module.Service;
+import org.apache.skywalking.oap.server.core.dsl.classloader.BytecodeClassDefiner;
 
 /**
  * MeterSystem provides the API way to create {@link MetricsStreamProcessor} rather than manual analysis metrics or OAL
@@ -57,29 +64,18 @@ import org.apache.skywalking.oap.server.library.module.Service;
 @Slf4j
 public class MeterSystem implements Service {
     private static final String METER_CLASS_PACKAGE = "org.apache.skywalking.oap.server.core.analysis.meter.dynamic.";
-    private static ModuleManager MANAGER;
-    private static ClassPool CLASS_POOL;
-    private static List<NewMeter> TO_BE_CREATED_METERS = new ArrayList<>();
-    private static Map<String, Class<? extends MeterFunction>> FUNCTION_REGISTER = new HashMap<>();
+    private ModuleManager manager;
+    private ClassPool classPool;
+    private Map<String, Class<? extends AcceptableValue>> functionRegister = new HashMap<>();
     /**
      * Host the dynamic meter prototype classes. These classes could be create dynamically through {@link
      * Object#clone()} in the runtime;
      */
-    private static Map<String, MeterDefinition> METER_PROTOTYPES = new HashMap<>();
-    private static MeterSystem METER_SYSTEM;
-    private static boolean METER_CREATABLE = true;
+    private Map<String, MeterDefinition> meterPrototypes = new HashMap<>();
 
-    private MeterSystem() {
-
-    }
-
-    public synchronized static MeterSystem meterSystem(final ModuleManager manager) {
-        if (METER_SYSTEM != null) {
-            return METER_SYSTEM;
-        }
-
-        MANAGER = manager;
-        CLASS_POOL = ClassPool.getDefault();
+    public MeterSystem(final ModuleManager manager) {
+        this.manager = manager;
+        classPool = ClassPool.getDefault();
 
         ClassPath classpath = null;
         try {
@@ -97,14 +93,12 @@ public class MeterSystem implements Service {
                     throw new IllegalArgumentException(
                         "Function " + functionClass.getCanonicalName() + " doesn't implement AcceptableValue.");
                 }
-                FUNCTION_REGISTER.put(
+                functionRegister.put(
                     metricsFunction.functionName(),
-                    (Class<? extends MeterFunction>) functionClass
+                    (Class<? extends AcceptableValue>) functionClass
                 );
             }
         }
-        METER_SYSTEM = new MeterSystem();
-        return METER_SYSTEM;
     }
 
     /**
@@ -113,132 +107,607 @@ public class MeterSystem implements Service {
      *
      * @param metricsName  The name used as the storage eneity and in the query stage.
      * @param functionName The function provided through {@link MeterFunction}.
-     * @return true if created, false if it exists.
      * @throws IllegalArgumentException if the parameter can't match the expectation.
      * @throws UnexpectedException      if binary code manipulation fails or stream core failure.
      */
-    public synchronized <T> boolean create(String metricsName,
-                                           String functionName,
-                                           ScopeType type,
-                                           Class<T> dataType) throws IllegalArgumentException {
-        if (!METER_CREATABLE) {
-            throw new IllegalStateException("Can't create new metrics anymore");
-        }
+    public synchronized <T> void create(String metricsName,
+                                        String functionName,
+                                        ScopeType type) throws IllegalArgumentException {
+        final Class<? extends AcceptableValue> meterFunction = functionRegister.get(functionName);
 
-        final NewMeter newMeter = new NewMeter(metricsName, functionName, type, dataType);
-        if (TO_BE_CREATED_METERS.contains(newMeter)) {
+        if (meterFunction == null) {
+            throw new IllegalArgumentException("Function " + functionName + " can't be found.");
+        }
+        Type acceptance = null;
+        for (final Type genericInterface : meterFunction.getGenericInterfaces()) {
+            if (genericInterface instanceof ParameterizedType) {
+                ParameterizedType parameterizedType = (ParameterizedType) genericInterface;
+                if (parameterizedType.getRawType().getTypeName().equals(AcceptableValue.class.getName())) {
+                    Type[] arguments = parameterizedType.getActualTypeArguments();
+                    acceptance = arguments[0];
+                    break;
+                }
+            }
+        }
+        try {
+            create(metricsName, functionName, type, Class.forName(Objects.requireNonNull(acceptance).getTypeName()));
+        } catch (ClassNotFoundException e) {
+            throw new IllegalArgumentException(e);
+        }
+    }
+
+    /**
+     * Create streaming calculation of the given metrics name. This methods is synchronized due to heavy implementation
+     * including creating dynamic class. Don't use this in concurrency runtime.
+     *
+     * @param metricsName  The name used as the storage eneity and in the query stage.
+     * @param functionName The function provided through {@link MeterFunction}.
+     * @throws IllegalArgumentException if the parameter can't match the expectation.
+     * @throws UnexpectedException      if binary code manipulation fails or stream core failure.
+     */
+    public synchronized <T> void create(String metricsName,
+                                        String functionName,
+                                        ScopeType type,
+                                        Class<T> dataType) throws IllegalArgumentException {
+        // Static boot path: create-if-absent semantics so a backend that already holds this
+        // metric under a different shape is preserved and reported, not silently reshaped.
+        createInternal(metricsName, functionName, type, dataType, classPool, MeterClassPackageHolder.class,
+            StorageManipulationOpt.schemaCreateIfAbsent());
+    }
+
+    /**
+     * Runtime-rule overload at the 3-arg entry point: resolves {@code dataType} reflectively
+     * from the function's {@link AcceptableValue} parameterization (same derivation as the
+     * no-pool 3-arg overload at {@link #create(String, String, ScopeType)}) and threads the
+     * caller-supplied per-file {@code ClassPool} + {@code ClassLoader} through so the
+     * generated Metrics subclass is defined directly IN the runtime-rule loader (not in the
+     * neighbor's loader). Lets the runtime-rule bundle drop every class it created together.
+     */
+    /**
+     * Runtime-rule entry point: create a streaming calculation under a caller-supplied
+     * per-file {@code ClassPool} + {@code ClassLoader}, with a caller-specified
+     * {@link StorageManipulationOpt} policy. Main-node apply passes
+     * {@link StorageManipulationOpt#withSchemaChange()} (the usual install path); peer-node apply
+     * passes {@link StorageManipulationOpt#withoutSchemaChange()} so local state is populated
+     * (MeterSystem meterPrototypes, BanyanDB MetadataRegistry, StorageModels entry) without
+     * firing server-side {@code createMeasure} / {@code update}.
+     */
+    public synchronized void create(String metricsName,
+                                    String functionName,
+                                    ScopeType type,
+                                    ClassPool pool,
+                                    ClassLoader targetClassLoader,
+                                    StorageManipulationOpt opt) throws IllegalArgumentException {
+        final Class<? extends AcceptableValue> meterFunction = functionRegister.get(functionName);
+        if (meterFunction == null) {
+            throw new IllegalArgumentException("Function " + functionName + " can't be found.");
+        }
+        Type acceptance = null;
+        for (final Type genericInterface : meterFunction.getGenericInterfaces()) {
+            if (genericInterface instanceof ParameterizedType) {
+                ParameterizedType parameterizedType = (ParameterizedType) genericInterface;
+                if (parameterizedType.getRawType().getTypeName().equals(AcceptableValue.class.getName())) {
+                    Type[] arguments = parameterizedType.getActualTypeArguments();
+                    acceptance = arguments[0];
+                    break;
+                }
+            }
+        }
+        try {
+            createInternal(metricsName, functionName, type,
+                Class.forName(Objects.requireNonNull(acceptance).getTypeName()),
+                pool, targetClassLoader, opt);
+        } catch (ClassNotFoundException e) {
+            throw new IllegalArgumentException(e);
+        }
+    }
+
+    private <T> void createInternal(final String metricsName,
+                                    final String functionName,
+                                    final ScopeType type,
+                                    final Class<T> dataType,
+                                    final ClassPool pool,
+                                    final ClassLoader targetClassLoader,
+                                    final StorageManipulationOpt opt) throws IllegalArgumentException {
+        final Class<? extends AcceptableValue> meterFunction = functionRegister.get(functionName);
+        if (meterFunction == null) {
+            throw new IllegalArgumentException("Function " + functionName + " can't be found.");
+        }
+        boolean foundDataType = false;
+        String acceptance = null;
+        for (final Type genericInterface : meterFunction.getGenericInterfaces()) {
+            if (genericInterface instanceof ParameterizedType) {
+                ParameterizedType parameterizedType = (ParameterizedType) genericInterface;
+                if (parameterizedType.getRawType().getTypeName().equals(AcceptableValue.class.getName())) {
+                    Type[] arguments = parameterizedType.getActualTypeArguments();
+                    if (arguments[0].equals(dataType)) {
+                        foundDataType = true;
+                    } else {
+                        acceptance = arguments[0].getTypeName();
+                    }
+                }
+                if (foundDataType) {
+                    break;
+                }
+            }
+        }
+        if (!foundDataType) {
+            throw new IllegalArgumentException("Function " + functionName
+                + " requires <" + acceptance + "> in AcceptableValue"
+                + " but using " + dataType.getName() + " in the creation");
+        }
+        final CtClass parentClass;
+        try {
+            parentClass = pool.get(meterFunction.getCanonicalName());
+            if (!Metrics.class.isAssignableFrom(meterFunction)) {
+                throw new IllegalArgumentException(
+                    "Function " + functionName + " doesn't inherit from Metrics.");
+            }
+        } catch (NotFoundException e) {
+            throw new IllegalArgumentException("Function " + functionName + " can't be found by javaassist.");
+        }
+        final String className = formatName(metricsName);
+        // Prototype-first short-circuit (fires on runtime FILTER_ONLY re-apply). Every
+        // runtime apply hands in a fresh {@code ClassPool}, so the pool-based existence
+        // check below cannot see a Metrics class the previous apply defined in a now-dead
+        // pool. Without this guard, every FILTER_ONLY update generated a new Metrics class,
+        // new MetricsStreamProcessor workers, and a new prototype that shadowed the old
+        // one in {@link #meterPrototypes} — a removeMetric by name could only tear down the
+        // latest generation, leaving prior workers + classloaders pinned forever. Match on
+        // scope + data type + function class; any of those differing is a genuine shape
+        // change and the existing IllegalArgumentException on the pool path fires below.
+        final MeterDefinition existingDefinition = meterPrototypes.get(metricsName);
+        if (existingDefinition != null
+            && existingDefinition.getScopeType() == type
+            && existingDefinition.getDataType().equals(dataType)
+            && existingDefinition.getMeterPrototype().getClass().getSuperclass() == meterFunction) {
+            log.debug("Metric {} already registered with matching shape; reusing existing "
+                + "Metrics class + workers (FILTER_ONLY re-apply path).", metricsName);
+            return;
+        }
+        try {
+            CtClass existingMetric = pool.get(METER_CLASS_PACKAGE + className);
+            if (existingMetric.getSuperclass() != parentClass
+                || type != meterPrototypes.get(metricsName).getScopeType()) {
+                throw new IllegalArgumentException(
+                    metricsName + " has been defined, but calculate function or/are scope type is/are different.");
+            }
+            log.info("Metric {} is already defined, so skip the metric creation.", metricsName);
+            return;
+        } catch (NotFoundException ignored) {
+            // proceed — class not yet defined in this pool
+        }
+        CtClass metricsClass = pool.makeClass(METER_CLASS_PACKAGE + className, parentClass);
+        try {
+            metricsClass.addConstructor(CtNewConstructor.make("public " + className + "() {}", metricsClass));
+            metricsClass.addMethod(CtNewMethod.make(
+                "public org.apache.skywalking.oap.server.core.analysis.meter.function.AcceptableValue createNew() {"
+                    + "    org.apache.skywalking.oap.server.core.analysis.meter.function.AcceptableValue meterVar = new " + METER_CLASS_PACKAGE + className + "();"
+                    + "    ((org.apache.skywalking.oap.server.core.analysis.meter.Meter)meterVar).initMeta(\"" + metricsName + "\", " + type.getScopeId() + ");"
+                    + "    return meterVar;"
+                    + "}",
+                metricsClass));
+        } catch (CannotCompileException e) {
+            throw new UnexpectedException(e.getMessage(), e);
+        }
+        final Class targetClass;
+        try {
+            // The generated class goes into the per-file RuleClassLoader, not a neighbour's
+            // loader. BytecodeClassDefiner.define owns which of the two definition paths applies and
+            // why; the anchor is only reached when targetClassLoader is null, which this
+            // overload's single caller never does.
+            targetClass = BytecodeClassDefiner.define(
+                metricsClass, targetClassLoader, MeterClassPackageHolder.class);
+            AcceptableValue prototype = (AcceptableValue) targetClass.newInstance();
+            meterPrototypes.put(metricsName, new MeterDefinition(type, prototype, dataType, true));
+            MetricsStreamProcessor.getInstance().create(
+                manager,
+                new StreamDefinition(
+                    metricsName, type.getScopeId(), prototype.builder(), MetricsStreamProcessor.class),
+                targetClass,
+                opt);
+            // Roll back the prototype if the installer refused to reshape the backend
+            // (SKIPPED_SHAPE_MISMATCH recorded on opt). Leaving the prototype in
+            // meterPrototypes would mean dispatch lookups succeed for a metric whose
+            // storage workers MetricsStreamProcessor refused to register — samples would
+            // fail silently later rather than at registration time. Boot continues with
+            // this metric inactive; operator reshapes explicitly via the runtime-rule
+            // on-demand endpoint.
+            if (opt.hasShapeMismatch()) {
+                meterPrototypes.remove(metricsName);
+            }
+        } catch (CannotCompileException | IllegalAccessException | InstantiationException
+                 | StorageException e) {
+            // Also roll back on exception paths — an unsuccessful create must not leave a
+            // prototype stranded in the registry. A failure to serialise the generated bytes
+            // arrives here as CannotCompileException, wrapped by BytecodeClassDefiner.define, and is
+            // handled the same way it always was.
+            meterPrototypes.remove(metricsName);
+            throw new UnexpectedException(e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Runtime-rule overload: create a streaming calculation whose dynamically-generated
+     * {@code Metrics} subclass is made in the caller-supplied {@code ClassPool} and loaded through
+     * the caller-supplied {@code classLoaderNeighbor} (a class already loaded by the target
+     * per-file {@code RuleClassLoader}).
+     *
+     * <p>Used by MAL/LAL hot-update so all of a rule file's generated classes — the
+     * {@code MalExpression} / {@code LalExpression} + closure companions produced by the DSL
+     * generators AND the {@code Metrics} subclass produced here — share one classloader and can
+     * all be dropped together for GC on hot-remove. Without this overload, the Metrics class
+     * would remain pinned in the default pool and the default loader, blocking shape-breaking
+     * re-registration and leaking classes across churn.
+     *
+     * <p>Startup path is unchanged — the existing overloads continue to use the instance-field
+     * default pool and {@link MeterClassPackageHolder} as the loader neighbor.
+     *
+     * @param metricsName          storage entity name
+     * @param functionName         function provided through {@link MeterFunction}
+     * @param type                 scope type
+     * @param dataType             accepted value data type
+     * @param pool                 per-file Javassist pool, typically constructed as
+     *                             {@code new ClassPool(ClassPool.getDefault())} with
+     *                             {@code LoaderClassPath(ruleLoader)} appended
+     * @param classLoaderNeighbor  a class loaded by the per-file {@code RuleClassLoader}; used
+     *                             by Javassist's {@code toClass(Class)} on Java 9+ to resolve
+     *                             the target loader. On Java 8, its classloader is passed to
+     *                             the legacy {@code toClass(ClassLoader, ProtectionDomain)}
+     */
+    public synchronized <T> void create(String metricsName,
+                                        String functionName,
+                                        ScopeType type,
+                                        Class<T> dataType,
+                                        ClassPool pool,
+                                        Class<?> classLoaderNeighbor) throws IllegalArgumentException {
+        if (pool == null) {
+            throw new IllegalArgumentException("pool must not be null");
+        }
+        if (classLoaderNeighbor == null) {
+            throw new IllegalArgumentException("classLoaderNeighbor must not be null");
+        }
+        createInternal(metricsName, functionName, type, dataType, pool, classLoaderNeighbor,
+            StorageManipulationOpt.withSchemaChange());
+    }
+
+    /**
+     * Remove a previously-registered metric by name. Symmetric to {@link #create(String, String,
+     * ScopeType, Class)} / the pool-aware overload. Used by runtime rule hot-remove (MAL/LAL)
+     * to retire a metric class cleanly.
+     *
+     * <p>Steps:
+     * <ol>
+     *   <li>Drops the {@link #meterPrototypes} entry so {@link #buildMetrics(String, Class)}
+     *       rejects further builds for this name.</li>
+     *   <li>Delegates to {@link MetricsStreamProcessor#removeMetric} — L1/L2 drain, worker
+     *       deregistration, shared-queue handler removal.</li>
+     *   <li>Cascades through {@link ModelRegistry#remove(Class, StorageManipulationOpt)} to drop every downsampling
+     *       variant's {@code Model} from the registry; listener {@code whenRemoving} fires for
+     *       each (BanyanDB drops the measure, JDBC/ES no-op).</li>
+     *   <li>Detaches the {@link CtClass} from the default {@link #classPool} so a later
+     *       shape-breaking re-create (e.g. {@code sum}→{@code histogram}) passes the pre-check at
+     *       {@link #create(String, String, ScopeType, Class)} rather than failing with "already
+     *       defined... calculate function or/are scope type is/are different". For runtime-path
+     *       metrics the CtClass lives in a per-file pool owned by the bundle; dropping the
+     *       bundle's pool reference collects the CtClass automatically, so the default-pool
+     *       detach is a best-effort no-op in that case ({@link NotFoundException} is expected).</li>
+     * </ol>
+     *
+     * <p>Not safe to call concurrently with {@link #create(String, String, ScopeType, Class)} or
+     * another {@link #removeMetric} — the MeterSystem monitor serializes them. Callers must hold
+     * no other lock that could invert with the MeterSystem monitor. The runtime-rule
+     * module's per-file lock is always acquired before this monitor, never after.
+     *
+     * @param metricsName the metric name to retire
+     * @return {@code true} if a metric was found and removed, {@code false} otherwise
+     */
+    public synchronized boolean removeMetric(final String metricsName) {
+        return removeMetric(metricsName, StorageManipulationOpt.withSchemaChange());
+    }
+
+    /**
+     * Opt-aware {@code removeMetric}. Runtime-rule peer-side callers pass
+     * {@link StorageManipulationOpt#withoutSchemaChange()} so {@code ModelInstaller.dropTable} is
+     * NOT invoked on the shared storage — the cluster main owns that side-effect.
+     *
+     * <p>Order is backend-first / local-state-second so failure is retriable. The earlier
+     * version evicted {@code meterPrototypes} and called the cascade in parallel; if the
+     * cascade threw (BanyanDB {@code dropTable} failure), the local state was already torn
+     * down — there was nothing for the next {@code /inactivate} or reconciler tick to drive
+     * a backend retry against, and the operator could not recover the orphaned measure
+     * without an OAP restart. Now the cascade runs first; on success we drop the local
+     * caches; on failure we leave {@code meterPrototypes} populated and the CtClass attached
+     * so a retry hits the backend again.
+     *
+     * <p>Failure surface: under {@code withSchemaChange} the storage-model cascade failure is
+     * propagated as a {@link RuntimeException}. The REST {@code /inactivate} path depends on
+     * this to surface 500 {@code teardown_deferred} when BanyanDB's delete-measure threw —
+     * without it the handler would return 200 inactivated despite the measure still being
+     * live. Under {@code withoutSchemaChange} the cascade fires {@code whenRemoving} but the
+     * peer's {@code ModelInstaller.dropTable} is suppressed by policy, so any throw is
+     * logged and swallowed — the peer has no backend debt. Streaming-chain drain failures
+     * are always logged and swallowed: stale workers self-drain within one tick.
+     */
+    public synchronized boolean removeMetric(final String metricsName, final StorageManipulationOpt opt) {
+        final MeterDefinition def = meterPrototypes.get(metricsName);
+        if (def == null) {
             return false;
         }
+        final Class<?> prototypeClass = def.getMeterPrototype().getClass();
 
-        TO_BE_CREATED_METERS.add(newMeter);
+        // Cascade storage-model removal (Hour / Day / Minute) FIRST. ModelRegistry.remove
+        // fires whenRemoving on every listener, so each backend's ModelInstaller.dropTable
+        // runs — real delete for BanyanDB, no-op for JDBC / Elasticsearch, skipped outright
+        // when the caller is a peer-side (WITHOUT_SCHEMA_CHANGE) apply. If a listener throws,
+        // ModelRegistry.remove keeps the model in its registry so this retry path stays
+        // open: the caller (Reconciler unregisterBundle) preserves appliedMal[key] and the
+        // next tick (or operator retry) re-enters this method, finds meterPrototypes still
+        // populated, and re-fires the cascade.
+        try {
+            final ModelRegistry modelCreator = manager.find(CoreModule.NAME)
+                                                     .provider()
+                                                     .getService(ModelRegistry.class);
+            modelCreator.remove(prototypeClass, opt);
+        } catch (final Throwable t) {
+            log.error("Failed to cascade storage-model removal for metric {}", metricsName, t);
+            if (opt.getFlags().isEscalateToCaller()) {
+                throw new RuntimeException(
+                    "Storage-model cascade failed for metric " + metricsName
+                        + "; backend drop did not complete. Local state preserved for retry.",
+                    t);
+            }
+            // Non-escalating opt (peer-side withoutSchemaChange, etc.) — backend drop is
+            // suppressed by policy anyway, so a listener throw here is the listener's
+            // local bookkeeping misbehaving, not real backend debt. Fall through to
+            // clear local state.
+        }
+
+        // Backend cascade succeeded (or local-cache-only, where it doesn't matter). Drop
+        // the prototype and drain the workers. Worker drain failure is non-fatal and
+        // logged: stale workers self-drain within one tick, and the prototype + Model are
+        // already gone so future samples can't reach them.
+        meterPrototypes.remove(metricsName);
+        try {
+            MetricsStreamProcessor.getInstance().removeMetric(manager, (Class) prototypeClass);
+        } catch (final Throwable t) {
+            log.error("Failed to remove streaming chain for metric {}; prototype + storage "
+                + "model already gone.", metricsName, t);
+        }
+
+        // Detach the CtClass from the default pool so a future shape-breaking re-create passes
+        // the pre-check at the head of createInternal. Static-path metrics own a CtClass in
+        // the instance default pool and must be detached explicitly; runtime-path metrics
+        // live in a per-file pool that goes away with the bundle, so the detach here is
+        // unnecessary. The flag is authoritative — do not reach for the default pool and
+        // swallow NotFoundException as a substitute.
+        if (!def.isRuntimeManaged()) {
+            try {
+                final CtClass staleCtClass = classPool.get(METER_CLASS_PACKAGE + formatName(metricsName));
+                staleCtClass.detach();
+            } catch (final NotFoundException e) {
+                log.warn("removeMetric({}): static-path metric was expected in default pool but "
+                    + "was not present; shape-break re-registration may fail the pre-check. "
+                    + "This indicates the metric was registered through an unexpected path.",
+                    metricsName);
+            }
+        }
         return true;
     }
 
     /**
-     * Close the {@link #create(String, String, ScopeType, Class)} channel, and build the model and streaming
-     * definitions.
+     * Reversible pause of streaming dispatch for a set of metric names. Used by the
+     * runtime-rule Suspend phase: the receiving OAP node instructs peers (and itself, for
+     * local consistency) to stop serving a bundle while the main node applies the structural
+     * DDL + verify. Peers resume via {@link #resumeDispatch} once the row is upserted with
+     * the new content.
+     *
+     * <p>Delegates to {@link MetricsStreamProcessor#suspendDispatch(Class)} per metric. The
+     * measure, persistent workers, and storage-model registration stay live — only the entry
+     * dispatch is parked. Idempotent: names not registered or already suspended are skipped.
+     *
+     * @return count of metrics that actually transitioned into the suspended state.
      */
-    public static void closeMeterCreationChannel() {
-        METER_CREATABLE = false;
-
-        TO_BE_CREATED_METERS.forEach(newMeter -> {
-            String metricsName = newMeter.metricsName;
-            String functionName = newMeter.functionName;
-            ScopeType type = newMeter.type;
-            Class<?> dataType = newMeter.dataType;
-
-            /**
-             * Create a new meter class dynamically.
-             */
-            final Class<? extends MeterFunction> meterFunction = FUNCTION_REGISTER.get(functionName);
-
-            if (meterFunction == null) {
-                throw new IllegalArgumentException("Function " + functionName + " can't be found.");
+    public synchronized int suspendDispatch(final Set<String> metricsNames) {
+        if (metricsNames == null || metricsNames.isEmpty()) {
+            return 0;
+        }
+        int suspended = 0;
+        final MetricsStreamProcessor processor = MetricsStreamProcessor.getInstance();
+        for (final String name : metricsNames) {
+            final MeterDefinition def = meterPrototypes.get(name);
+            if (def == null) {
+                continue;
             }
+            final Class<?> prototypeClass = def.getMeterPrototype().getClass();
+            try {
+                if (processor.suspendDispatch((Class) prototypeClass)) {
+                    suspended++;
+                }
+            } catch (final Throwable t) {
+                log.warn("suspendDispatch failed for metric {}; continuing with the rest.", name, t);
+            }
+        }
+        return suspended;
+    }
 
-            boolean foundDataType = false;
-            String acceptance = null;
-            for (final Type genericInterface : meterFunction.getGenericInterfaces()) {
-                if (genericInterface instanceof ParameterizedType) {
-                    ParameterizedType parameterizedType = (ParameterizedType) genericInterface;
-                    if (parameterizedType.getRawType().getTypeName().equals(AcceptableValue.class.getName())) {
-                        Type[] arguments = parameterizedType.getActualTypeArguments();
-                        if (arguments[0].equals(dataType)) {
-                            foundDataType = true;
-                        } else {
-                            acceptance = arguments[0].getTypeName();
-                        }
-                    }
-                    if (foundDataType) {
-                        break;
+    /**
+     * Inverse of {@link #suspendDispatch}: re-installs the parked entry workers so samples
+     * dispatch again. Idempotent; names not currently parked are skipped.
+     *
+     * @return count of metrics that actually transitioned back to live dispatch.
+     */
+    public synchronized int resumeDispatch(final Set<String> metricsNames) {
+        if (metricsNames == null || metricsNames.isEmpty()) {
+            return 0;
+        }
+        int resumed = 0;
+        final MetricsStreamProcessor processor = MetricsStreamProcessor.getInstance();
+        for (final String name : metricsNames) {
+            final MeterDefinition def = meterPrototypes.get(name);
+            if (def == null) {
+                continue;
+            }
+            final Class<?> prototypeClass = def.getMeterPrototype().getClass();
+            try {
+                if (processor.resumeDispatch((Class) prototypeClass)) {
+                    resumed++;
+                }
+            } catch (final Throwable t) {
+                log.warn("resumeDispatch failed for metric {}; continuing with the rest.", name, t);
+            }
+        }
+        return resumed;
+    }
+
+    private <T> void createInternal(final String metricsName,
+                                    final String functionName,
+                                    final ScopeType type,
+                                    final Class<T> dataType,
+                                    final ClassPool pool,
+                                    final Class<?> classLoaderNeighbor,
+                                    final StorageManipulationOpt opt) throws IllegalArgumentException {
+        /*
+         * Create a new meter class dynamically.
+         */
+        final Class<? extends AcceptableValue> meterFunction = functionRegister.get(functionName);
+
+        if (meterFunction == null) {
+            throw new IllegalArgumentException("Function " + functionName + " can't be found.");
+        }
+
+        boolean foundDataType = false;
+        String acceptance = null;
+        for (final Type genericInterface : meterFunction.getGenericInterfaces()) {
+            if (genericInterface instanceof ParameterizedType) {
+                ParameterizedType parameterizedType = (ParameterizedType) genericInterface;
+                if (parameterizedType.getRawType().getTypeName().equals(AcceptableValue.class.getName())) {
+                    Type[] arguments = parameterizedType.getActualTypeArguments();
+                    if (arguments[0].equals(dataType)) {
+                        foundDataType = true;
+                    } else {
+                        acceptance = arguments[0].getTypeName();
                     }
                 }
-            }
-            if (!foundDataType) {
-                throw new IllegalArgumentException("Function " + functionName
-                                                       + " requires <" + acceptance + "> in AcceptableValue"
-                                                       + " but using " + dataType.getName() + " in the creation");
-            }
-
-            final CtClass parentClass;
-            try {
-                parentClass = CLASS_POOL.get(meterFunction.getCanonicalName());
-                if (!Metrics.class.isAssignableFrom(meterFunction)) {
-                    throw new IllegalArgumentException(
-                        "Function " + functionName + " doesn't inherit from Metrics.");
+                if (foundDataType) {
+                    break;
                 }
-            } catch (NotFoundException e) {
-                throw new IllegalArgumentException("Function " + functionName + " can't be found by javaassist.");
             }
-            final String className = formatName(metricsName);
-            CtClass metricsClass = CLASS_POOL.makeClass(METER_CLASS_PACKAGE + className, parentClass);
+        }
+        if (!foundDataType) {
+            throw new IllegalArgumentException("Function " + functionName
+                                                   + " requires <" + acceptance + "> in AcceptableValue"
+                                                   + " but using " + dataType.getName() + " in the creation");
+        }
 
-            /**
-             * Create empty construct
-             */
-            try {
-                CtConstructor defaultConstructor = CtNewConstructor.make(
-                    "public " + className + "() {}", metricsClass);
-                metricsClass.addConstructor(defaultConstructor);
-            } catch (CannotCompileException e) {
-                log.error("Can't add empty constructor in " + className + ".", e);
-                throw new UnexpectedException(e.getMessage(), e);
+        final CtClass parentClass;
+        try {
+            parentClass = pool.get(meterFunction.getCanonicalName());
+            if (!Metrics.class.isAssignableFrom(meterFunction)) {
+                throw new IllegalArgumentException(
+                    "Function " + functionName + " doesn't inherit from Metrics.");
             }
+        } catch (NotFoundException e) {
+            throw new IllegalArgumentException("Function " + functionName + " can't be found by javaassist.");
+        }
+        final String className = formatName(metricsName);
 
-            /**
-             * Generate `AcceptableValue<T> createNew()` method.
-             */
-            try {
-                metricsClass.addMethod(CtNewMethod.make(
-                    ""
-                        + "public org.apache.skywalking.oap.server.core.analysis.meter.function.AcceptableValue createNew() {"
-                        + "    return new " + METER_CLASS_PACKAGE + className + "();"
-                        + " }"
-                    , metricsClass));
-            } catch (CannotCompileException e) {
-                log.error("Can't generate createNew method for " + className + ".", e);
-                throw new UnexpectedException(e.getMessage(), e);
+        /*
+         * Prototype-first short-circuit for runtime FILTER_ONLY re-apply — see the same
+         * guard in the default-pool {@code createInternal} above for the full rationale. The
+         * pool-based check below can't detect an existing registration because every
+         * runtime apply hands in a fresh pool; without this, each FILTER_ONLY iteration
+         * leaks a new Metrics class + a new worker chain + a new classloader.
+         */
+        final MeterDefinition existingDefinition = meterPrototypes.get(metricsName);
+        if (existingDefinition != null
+            && existingDefinition.getScopeType() == type
+            && existingDefinition.getDataType().equals(dataType)
+            && existingDefinition.getMeterPrototype().getClass().getSuperclass() == meterFunction) {
+            log.debug("Metric {} already registered with matching shape; reusing existing "
+                + "Metrics class + workers (FILTER_ONLY re-apply path).", metricsName);
+            return;
+        }
+
+        /*
+         * Check whether the metrics class is already defined or not
+         */
+        try {
+            CtClass existingMetric = pool.get(METER_CLASS_PACKAGE + className);
+            if (existingMetric.getSuperclass() != parentClass || type != meterPrototypes.get(metricsName)
+                                                                                        .getScopeType()) {
+                throw new IllegalArgumentException(
+                    metricsName + " has been defined, but calculate function or/are scope type is/are different.");
             }
+            log.info("Metric {} is already defined, so skip the metric creation.", metricsName);
+            return;
+        } catch (NotFoundException e) {
+            // proceed — class not yet defined in this pool
+        }
 
-            Class targetClass;
-            try {
-                targetClass = metricsClass.toClass(MeterSystem.class.getClassLoader(), null);
-                AcceptableValue prototype = (AcceptableValue) targetClass.newInstance();
-                METER_PROTOTYPES.put(metricsName, new MeterDefinition(type, prototype, dataType));
+        CtClass metricsClass = pool.makeClass(METER_CLASS_PACKAGE + className, parentClass);
 
-                log.debug("Generate metrics class, " + metricsClass.getName());
+        /*
+         * Create empty construct
+         */
+        try {
+            CtConstructor defaultConstructor = CtNewConstructor.make(
+                "public " + className + "() {}", metricsClass);
+            metricsClass.addConstructor(defaultConstructor);
+        } catch (CannotCompileException e) {
+            log.error("Can't add empty constructor in " + className + ".", e);
+            throw new UnexpectedException(e.getMessage(), e);
+        }
 
-                MetricsStreamProcessor.getInstance().create(
-                    MANAGER,
-                    new StreamDefinition(
-                        metricsName, type.getScopeId(), prototype.builder(), MetricsStreamProcessor.class),
-                    targetClass
-                );
-            } catch (CannotCompileException | IllegalAccessException | InstantiationException e) {
-                log.error("Can't compile/load/init " + className + ".", e);
-                throw new UnexpectedException(e.getMessage(), e);
+        /*
+         * Generate `AcceptableValue<T> createNew()` method.
+         */
+        try {
+            metricsClass.addMethod(CtNewMethod.make(
+                ""
+                    + "public org.apache.skywalking.oap.server.core.analysis.meter.function.AcceptableValue createNew() {"
+                    + "    org.apache.skywalking.oap.server.core.analysis.meter.function.AcceptableValue meterVar = new " + METER_CLASS_PACKAGE + className + "();"
+                    + "    ((org.apache.skywalking.oap.server.core.analysis.meter.Meter)meterVar).initMeta(\"" + metricsName + "\", " + type.getScopeId() + ");"
+                    + "    return meterVar;"
+                    + " }"
+                , metricsClass));
+        } catch (CannotCompileException e) {
+            log.error("Can't generate createNew method for " + className + ".", e);
+            throw new UnexpectedException(e.getMessage(), e);
+        }
+
+        Class targetClass;
+        try {
+            if (SystemUtils.isJavaVersionAtMost(JavaVersion.JAVA_1_8)) {
+                targetClass = metricsClass.toClass(classLoaderNeighbor.getClassLoader(), null);
+            } else {
+                targetClass = metricsClass.toClass(classLoaderNeighbor);
             }
-        });
+            AcceptableValue prototype = (AcceptableValue) targetClass.newInstance();
+            meterPrototypes.put(metricsName, new MeterDefinition(type, prototype, dataType, false));
+
+            log.debug("Generate metrics class, " + metricsClass.getName());
+
+            MetricsStreamProcessor.getInstance().create(
+                manager,
+                new StreamDefinition(
+                    metricsName, type.getScopeId(), prototype.builder(), MetricsStreamProcessor.class),
+                targetClass,
+                opt
+            );
+            // Same shape-mismatch guard as the static-catalog createInternal path. Under
+            // full-install mode the opt shouldn't ever carry a SKIPPED_SHAPE_MISMATCH
+            // outcome (the installer reshapes), but defensively roll the prototype back if
+            // it does — a dispatch lookup against a prototype whose workers never came up
+            // produces confusing silent-drop failures later.
+            if (opt.hasShapeMismatch()) {
+                meterPrototypes.remove(metricsName);
+            }
+        } catch (CannotCompileException | IllegalAccessException | InstantiationException | StorageException e) {
+            log.error("Can't compile/load/init " + className + ".", e);
+            meterPrototypes.remove(metricsName);
+            throw new UnexpectedException(e.getMessage(), e);
+        }
     }
 
     /**
@@ -253,7 +722,7 @@ public class MeterSystem implements Service {
      */
     public <T> AcceptableValue<T> buildMetrics(String metricsName,
                                                Class<T> dataType) {
-        MeterDefinition meterDefinition = METER_PROTOTYPES.get(metricsName);
+        MeterDefinition meterDefinition = meterPrototypes.get(metricsName);
         if (meterDefinition == null) {
             throw new IllegalArgumentException("Uncreated metrics " + metricsName);
         }
@@ -285,19 +754,20 @@ public class MeterSystem implements Service {
     }
 
     @RequiredArgsConstructor
-    @EqualsAndHashCode
-    public static class NewMeter {
-        private final String metricsName;
-        private final String functionName;
-        private final ScopeType type;
-        private final Class<?> dataType;
-    }
-
-    @RequiredArgsConstructor
     @Getter
     private static class MeterDefinition {
         private final ScopeType scopeType;
         private final AcceptableValue meterPrototype;
         private final Class<?> dataType;
+        /**
+         * {@code true} when the generated {@code Metrics} class lives in a caller-supplied
+         * per-file {@code ClassPool}/{@code ClassLoader} (runtime-rule hot-update path —
+         * {@link #create(String, String, ScopeType, Class, ClassPool, Class, StorageManipulationOpt)}).
+         * {@code false} when the class lives in the instance {@link #classPool} (static boot
+         * path). Read by {@link #removeMetric} to decide whether a default-pool {@code CtClass}
+         * detach is required (static path) or a no-op (runtime path — the per-file pool
+         * goes away with the bundle, taking the CtClass with it).
+         */
+        private final boolean runtimeManaged;
     }
 }

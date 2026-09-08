@@ -27,7 +27,7 @@
     <fileSets>
         <fileSet>
             <directory>${project.basedir}/../dist-material/bin</directory>
-            <outputDirectory>/bin</outputDirectory>
+            <outputDirectory>bin</outputDirectory>
             <includes>
                 <include>*.sh</include>
                 <include>*.bat</include>
@@ -36,76 +36,100 @@
         </fileSet>
         <fileSet>
             <directory>${project.basedir}/../dist-material</directory>
-            <outputDirectory>/config</outputDirectory>
+            <outputDirectory>config</outputDirectory>
             <includes>
                 <include>log4j2.xml</include>
                 <include>alarm-settings.yml</include>
-                <include>alarm-settings-sample.yml</include>
             </includes>
         </fileSet>
         <fileSet>
-            <directory>${project.basedir}/../oap-server/server-bootstrap/src/main/resources</directory>
+            <directory>${project.basedir}/../dist-material</directory>
+            <outputDirectory/>
+            <includes>
+                <include>config-examples/*</include>
+            </includes>
+        </fileSet>
+        <fileSet>
+            <directory>${project.basedir}/../oap-server/server-starter/src/main/resources</directory>
             <includes>
                 <include>application.yml</include>
                 <include>component-libraries.yml</include>
-                <include>official_analysis.oal</include>
                 <include>gateways.yml</include>
                 <include>service-apdex-threshold.yml</include>
+                <include>endpoint-name-grouping.yml</include>
+                <include>metadata-service-mapping.yaml</include>
+                <include>trace-sampling-policy-settings.yml</include>
+                <include>hierarchy-definition.yml</include>
+                <include>bydb.yml</include>
+                <include>bydb-topn.yml</include>
+                <include>oal/*.oal</include>
+                <include>fetcher-prom-rules/*.yaml</include>
+                <include>envoy-metrics-rules/**</include>
+                <include>meter-analyzer-config/*.yaml</include>
+                <include>zabbix-rules/*.yaml</include>
+                <include>openapi-definitions/*/*.yaml</include>
+                <include>otel-rules/**</include>
+                <include>lal/*</include>
+                <include>log-mal-rules/**</include>
+                <include>telegraf-rules/*</include>
+                <include>cilium-rules/*</include>
+                <include>ai-evaluation.yml</include>
+                <include>gen-ai-config.yml</include>
+                <include>layer-extensions.yml</include>
             </includes>
-            <outputDirectory>/config</outputDirectory>
+            <outputDirectory>config</outputDirectory>
         </fileSet>
         <fileSet>
-            <directory>${project.basedir}/../oap-server/server-starter/target/skywalking-oap-assembly/skywalking-oap/config</directory>
-            <outputDirectory>/config</outputDirectory>
-            <includes>
-                <include>*.yml</include>
-                <include>*.xml</include>
-                <include>*.properties</include>
-                <include>*.oal</include>
-            </includes>
-        </fileSet>
-        <fileSet>
-            <directory>${project.basedir}/../oap-server/server-starter/target/skywalking-oap-assembly/skywalking-oap/libs</directory>
-            <outputDirectory>/oap-libs</outputDirectory>
+            <directory>${project.basedir}/../oap-server/server-starter/target/oap-libs</directory>
+            <outputDirectory>oap-libs</outputDirectory>
         </fileSet>
 
-        <!-- Agent repackage into the dist -->
         <fileSet>
-            <directory>${project.basedir}/../skywalking-agent</directory>
-            <outputDirectory>/agent</outputDirectory>
+            <directory>${project.basedir}/../oap-server/server-tools/profile-exporter/tool-profile-snapshot-exporter/target/</directory>
+            <includes>
+                <include>tool-profile-snapshot-exporter-${project.version}.jar</include>
+            </includes>
+            <outputDirectory>oap-libs</outputDirectory>
         </fileSet>
+        <fileSet>
+            <directory>${project.basedir}/../oap-server/server-tools/profile-exporter/tool-profile-snapshot-exporter/target/oap-libs/</directory>
+            <outputDirectory>oap-libs</outputDirectory>
+        </fileSet>
+
+        <!-- data generator -->
+        <fileSet>
+            <directory>${project.basedir}/../oap-server/server-tools/data-generator/target/</directory>
+            <includes>
+                <include>data-generator-${project.version}.jar</include>
+            </includes>
+            <outputDirectory>oap-libs</outputDirectory>
+        </fileSet>
+        <fileSet>
+            <directory>${project.basedir}/../oap-server/server-tools/data-generator/src/main/assembly/bin</directory>
+            <outputDirectory>tools/data-generator/bin</outputDirectory>
+            <includes>
+                <include>*.sh</include>
+            </includes>
+            <fileMode>0755</fileMode>
+        </fileSet>
+        <fileSet>
+            <directory>${project.basedir}/../oap-server/server-tools/data-generator/src/main/resources</directory>
+            <outputDirectory>tools/data-generator/config</outputDirectory>
+            <includes>
+                <include>application.yml</include>
+            </includes>
+        </fileSet>
+        <!-- data generator -->
 
         <!-- Profile exporter tools -->
         <fileSet>
             <directory>${project.basedir}/../tools/profile-exporter</directory>
-            <outputDirectory>/tools/profile-exporter</outputDirectory>
-        </fileSet>
-
-        <!-- Release docs and licenses -->
-        <fileSet>
-            <directory>${project.basedir}/../</directory>
-            <outputDirectory>/</outputDirectory>
-            <includes>
-                <include>DISCLAIMER</include>
-                <include>CHANGES</include>
-            </includes>
+            <outputDirectory>tools/profile-exporter</outputDirectory>
         </fileSet>
 
         <fileSet>
             <directory>${project.basedir}/../dist-material/release-docs</directory>
-            <outputDirectory>/</outputDirectory>
+            <outputDirectory/>
         </fileSet>
     </fileSets>
-    <files>
-        <file>
-            <source>${project.basedir}/../apm-webapp/target/skywalking-webapp.jar</source>
-            <outputDirectory>/webapp</outputDirectory>
-            <fileMode>0644</fileMode>
-        </file>
-        <file>
-            <source>${project.basedir}/../apm-webapp/src/main/assembly/webapp.yml</source>
-            <outputDirectory>/webapp</outputDirectory>
-            <fileMode>0644</fileMode>
-        </file>
-    </files>
 </assembly>

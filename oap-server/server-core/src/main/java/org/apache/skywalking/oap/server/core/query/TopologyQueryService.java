@@ -19,35 +19,51 @@
 package org.apache.skywalking.oap.server.core.query;
 
 import com.google.common.base.Strings;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.skywalking.oap.server.core.Const;
 import org.apache.skywalking.oap.server.core.CoreModule;
 import org.apache.skywalking.oap.server.core.analysis.IDManager;
 import org.apache.skywalking.oap.server.core.config.IComponentLibraryCatalogService;
+import org.apache.skywalking.oap.server.core.query.input.Duration;
 import org.apache.skywalking.oap.server.core.query.type.Call;
+import org.apache.skywalking.oap.server.core.query.type.EndpointTopology;
 import org.apache.skywalking.oap.server.core.query.type.Node;
+import org.apache.skywalking.oap.server.core.query.type.ProcessTopology;
 import org.apache.skywalking.oap.server.core.query.type.ServiceInstanceTopology;
 import org.apache.skywalking.oap.server.core.query.type.Topology;
+import org.apache.skywalking.oap.server.core.query.type.debugging.DebuggingSpan;
+import org.apache.skywalking.oap.server.core.query.type.debugging.DebuggingTraceContext;
 import org.apache.skywalking.oap.server.core.source.DetectPoint;
 import org.apache.skywalking.oap.server.core.storage.StorageModule;
+import org.apache.skywalking.oap.server.core.storage.model.StorageModels;
 import org.apache.skywalking.oap.server.core.storage.query.ITopologyQueryDAO;
 import org.apache.skywalking.oap.server.library.module.ModuleManager;
 import org.apache.skywalking.oap.server.library.module.Service;
 import org.apache.skywalking.oap.server.library.util.CollectionUtils;
+import org.apache.skywalking.oap.server.library.util.StringUtil;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import static org.apache.skywalking.oap.server.core.query.type.debugging.DebuggingTraceContext.TRACE_CONTEXT;
 
 @Slf4j
 public class TopologyQueryService implements Service {
     private final ModuleManager moduleManager;
+    private final StorageModels storageModels;
     private ITopologyQueryDAO topologyQueryDAO;
     private IComponentLibraryCatalogService componentLibraryCatalogService;
+    private MetadataQueryService metadataQueryService;
 
-    public TopologyQueryService(ModuleManager moduleManager) {
+    public TopologyQueryService(ModuleManager moduleManager, StorageModels storageModels) {
         this.moduleManager = moduleManager;
+        this.storageModels = storageModels;
     }
 
     private ITopologyQueryDAO getTopologyQueryDAO() {
@@ -55,6 +71,13 @@ public class TopologyQueryService implements Service {
             topologyQueryDAO = moduleManager.find(StorageModule.NAME).provider().getService(ITopologyQueryDAO.class);
         }
         return topologyQueryDAO;
+    }
+
+    private MetadataQueryService getMetadataQueryService() {
+        if (metadataQueryService == null) {
+            metadataQueryService = moduleManager.find(CoreModule.NAME).provider().getService(MetadataQueryService.class);
+        }
+        return metadataQueryService;
     }
 
     private IComponentLibraryCatalogService getComponentLibraryCatalogService() {
@@ -66,26 +89,67 @@ public class TopologyQueryService implements Service {
         return componentLibraryCatalogService;
     }
 
-    public Topology getGlobalTopology(final long startTB,
-                                      final long endTB) throws IOException {
-        List<Call.CallDetail> serviceRelationServerCalls = getTopologyQueryDAO().loadServiceRelationsDetectedAtServerSide(
-            startTB, endTB);
-        List<Call.CallDetail> serviceRelationClientCalls = getTopologyQueryDAO().loadServiceRelationDetectedAtClientSide(
-            startTB, endTB);
-
-        ServiceTopologyBuilder builder = new ServiceTopologyBuilder(moduleManager);
-        return builder.build(serviceRelationClientCalls, serviceRelationServerCalls);
+    public Topology getGlobalTopology(final Duration duration, final String layer) throws IOException {
+        DebuggingTraceContext traceContext = TRACE_CONTEXT.get();
+        DebuggingSpan span = null;
+        try {
+            if (traceContext != null) {
+                span = traceContext.createSpan("Query Service: getGlobalTopology");
+                span.setMsg("Duration: " + duration + ", Layer: " + layer);
+            }
+            return invokeGetGlobalTopology(duration, layer);
+        } finally {
+            if (traceContext != null && span != null) {
+                traceContext.stopSpan(span);
+            }
+        }
     }
 
-    public Topology getServiceTopology(final long startTB, final long endTB,
-                                       final List<String> serviceIds) throws IOException {
-        List<Call.CallDetail> serviceRelationClientCalls = getTopologyQueryDAO().loadServiceRelationDetectedAtClientSide(
-            startTB, endTB, serviceIds);
-        List<Call.CallDetail> serviceRelationServerCalls = getTopologyQueryDAO().loadServiceRelationsDetectedAtServerSide(
-            startTB, endTB, serviceIds);
+    private Topology invokeGetGlobalTopology(final Duration duration, final String layer) throws IOException {
+        if (StringUtil.isNotEmpty(layer)) {
+            final List<String> serviceIdList = Optional.ofNullable(getMetadataQueryService().listServices(layer, null))
+                .map(list -> list.stream().map(s -> s.getId()).collect(Collectors.toList()))
+                .orElse(Collections.emptyList());
+            return getServiceTopology(duration, serviceIdList);
+        }
+        List<Call.CallDetail> serviceRelationServerCalls = getTopologyQueryDAO().loadServiceRelationsDetectedAtServerSideDebuggable(
+            duration);
+        List<Call.CallDetail> serviceRelationClientCalls = getTopologyQueryDAO().loadServiceRelationDetectedAtClientSideDebuggable(
+            duration);
 
         ServiceTopologyBuilder builder = new ServiceTopologyBuilder(moduleManager);
-        Topology topology = builder.build(serviceRelationClientCalls, serviceRelationServerCalls);
+        return builder.buildDebuggable(serviceRelationClientCalls, serviceRelationServerCalls);
+    }
+
+    public Topology getServiceTopology(final Duration duration,
+                                              final List<String> serviceIds) throws IOException {
+        DebuggingTraceContext traceContext = TRACE_CONTEXT.get();
+        DebuggingSpan span = null;
+        try {
+            if (traceContext != null) {
+                span = traceContext.createSpan("Query Service: getServiceTopology");
+                span.setMsg("Duration: " + duration + ", ServiceIds: " + serviceIds);
+            }
+            if (CollectionUtils.isEmpty(serviceIds)) {
+                return new Topology();
+            }
+            return invokeGetServiceTopology(duration, serviceIds);
+        } finally {
+            if (traceContext != null && span != null) {
+                traceContext.stopSpan(span);
+            }
+        }
+    }
+
+    private Topology invokeGetServiceTopology(final Duration duration,
+                                       final List<String> serviceIds) throws IOException {
+        List<Call.CallDetail> serviceRelationClientCalls = getTopologyQueryDAO().loadServiceRelationDetectedAtClientSideDebuggable(
+            duration, serviceIds);
+        List<Call.CallDetail> serviceRelationServerCalls = getTopologyQueryDAO().loadServiceRelationsDetectedAtServerSideDebuggable(
+            duration, serviceIds);
+
+        ServiceTopologyBuilder builder = new ServiceTopologyBuilder(moduleManager);
+        Topology topology = builder.buildDebuggable(serviceRelationClientCalls, serviceRelationServerCalls);
 
         /**
          * The topology built above is complete.
@@ -102,8 +166,8 @@ public class TopologyQueryService implements Service {
         });
         if (CollectionUtils.isNotEmpty(outScopeSourceServiceIds)) {
             // If exist, query them as the server side to get the target's component.
-            List<Call.CallDetail> sourceCalls = getTopologyQueryDAO().loadServiceRelationsDetectedAtServerSide(
-                startTB, endTB, outScopeSourceServiceIds);
+            List<Call.CallDetail> sourceCalls = getTopologyQueryDAO().loadServiceRelationsDetectedAtServerSideDebuggable(
+                duration, outScopeSourceServiceIds);
             topology.getNodes().forEach(node -> {
                 if (Strings.isNullOrEmpty(node.getType())) {
                     for (Call.CallDetail call : sourceCalls) {
@@ -121,21 +185,39 @@ public class TopologyQueryService implements Service {
 
     public ServiceInstanceTopology getServiceInstanceTopology(final String clientServiceId,
                                                               final String serverServiceId,
-                                                              final long startTB,
-                                                              final long endTB) throws IOException {
-        List<Call.CallDetail> serviceInstanceRelationClientCalls = getTopologyQueryDAO().loadInstanceRelationDetectedAtClientSide(
-            clientServiceId, serverServiceId, startTB, endTB);
-        List<Call.CallDetail> serviceInstanceRelationServerCalls = getTopologyQueryDAO().loadInstanceRelationDetectedAtServerSide(
-            clientServiceId, serverServiceId, startTB, endTB);
+                                                              final Duration duration) throws IOException {
+        DebuggingTraceContext traceContext = TRACE_CONTEXT.get();
+        DebuggingSpan span = null;
+        try {
+            if (traceContext != null) {
+                span = traceContext.createSpan("Query Service: getServiceInstanceTopology");
+                span.setMsg("ClientServiceId: " + clientServiceId + ", ServerServiceId: " + serverServiceId + ", Duration: " + duration);
+            }
+            return invokeGetServiceInstanceTopology(clientServiceId, serverServiceId, duration);
+        } finally {
+            if (traceContext != null && span != null) {
+                traceContext.stopSpan(span);
+            }
+        }
+    }
+
+    private ServiceInstanceTopology invokeGetServiceInstanceTopology(final String clientServiceId,
+                                                              final String serverServiceId,
+                                                              final Duration duration) throws IOException {
+        List<Call.CallDetail> serviceInstanceRelationClientCalls = getTopologyQueryDAO().loadInstanceRelationDetectedAtClientSideDebuggable(
+            clientServiceId, serverServiceId, duration);
+        List<Call.CallDetail> serviceInstanceRelationServerCalls = getTopologyQueryDAO().loadInstanceRelationDetectedAtServerSideDebuggable(
+            clientServiceId, serverServiceId, duration);
 
         ServiceInstanceTopologyBuilder builder = new ServiceInstanceTopologyBuilder(moduleManager);
         return builder.build(serviceInstanceRelationClientCalls, serviceInstanceRelationServerCalls);
     }
 
-    public Topology getEndpointTopology(final long startTB, final long endTB,
+    @Deprecated
+    public Topology getEndpointTopology(final Duration duration,
                                         final String endpointId) throws IOException {
         List<Call.CallDetail> serverSideCalls = getTopologyQueryDAO().loadEndpointRelation(
-            startTB, endTB, endpointId);
+            duration, endpointId);
 
         Topology topology = new Topology();
         serverSideCalls.forEach(callDetail -> {
@@ -162,6 +244,56 @@ public class TopologyQueryService implements Service {
         return topology;
     }
 
+    public EndpointTopology getEndpointDependencies(final Duration duration,
+                                                    final String endpointId) throws IOException {
+        DebuggingTraceContext traceContext = TRACE_CONTEXT.get();
+        DebuggingSpan span = null;
+        try {
+            if (traceContext != null) {
+                span = traceContext.createSpan("Query Service: getEndpointDependencies");
+                span.setMsg("Duration: " + duration + ", EndpointId: " + endpointId);
+            }
+            return invokeGetEndpointDependencies(duration, endpointId);
+        } finally {
+            if (traceContext != null && span != null) {
+                traceContext.stopSpan(span);
+            }
+        }
+    }
+
+    private EndpointTopology invokeGetEndpointDependencies(final Duration duration,
+                                                    final String endpointId) throws IOException {
+        List<Call.CallDetail> serverSideCalls = getTopologyQueryDAO().loadEndpointRelationDebuggable(
+            duration, endpointId);
+        EndpointTopologyBuilder builder = new EndpointTopologyBuilder();
+        return builder.build(serverSideCalls);
+    }
+
+    public ProcessTopology getProcessTopology(final String instanceId, final Duration duration) throws Exception {
+        DebuggingTraceContext traceContext = TRACE_CONTEXT.get();
+        DebuggingSpan span = null;
+        try {
+            if (traceContext != null) {
+                span = traceContext.createSpan("Query Service: getProcessTopology");
+                span.setMsg("InstanceId: " + instanceId + ", Duration: " + duration);
+            }
+            return invokeGetProcessTopology(instanceId, duration);
+        } finally {
+            if (traceContext != null && span != null) {
+                traceContext.stopSpan(span);
+            }
+        }
+    }
+
+    private ProcessTopology invokeGetProcessTopology(final String instanceId, final Duration duration) throws Exception {
+        final List<Call.CallDetail> clientCalls = getTopologyQueryDAO().loadProcessRelationDetectedAtClientSideDebuggable(instanceId, duration);
+        final List<Call.CallDetail> serverCalls = getTopologyQueryDAO().loadProcessRelationDetectedAtServerSideDebuggable(instanceId, duration);
+
+        final ProcessTopologyBuilder topologyBuilder = new ProcessTopologyBuilder(moduleManager, storageModels);
+        return topologyBuilder.build(clientCalls, serverCalls);
+    }
+
+    @Deprecated
     private Node buildEndpointNode(String endpointId) {
         Node node = new Node();
         node.setId(endpointId);

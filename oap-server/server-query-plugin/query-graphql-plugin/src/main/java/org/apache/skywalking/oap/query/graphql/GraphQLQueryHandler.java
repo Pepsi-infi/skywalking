@@ -18,106 +18,83 @@
 
 package org.apache.skywalking.oap.query.graphql;
 
-import com.google.gson.Gson;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.reflect.TypeToken;
-import graphql.ExecutionInput;
-import graphql.ExecutionResult;
-import graphql.GraphQL;
-import graphql.GraphQLError;
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.lang.reflect.Type;
-import java.util.List;
-import java.util.Map;
-import javax.servlet.http.HttpServletRequest;
-import lombok.RequiredArgsConstructor;
-import org.apache.skywalking.oap.server.library.server.jetty.JettyJsonHandler;
-import org.apache.skywalking.oap.server.library.util.CollectionUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.skywalking.oap.server.library.module.ModuleManager;
+import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
+import org.apache.skywalking.oap.server.telemetry.api.CounterMetrics;
+import org.apache.skywalking.oap.server.telemetry.api.HistogramMetrics;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsCreator;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsTag;
 
-@RequiredArgsConstructor
-public class GraphQLQueryHandler extends JettyJsonHandler {
+import com.linecorp.armeria.common.HttpRequest;
+import com.linecorp.armeria.common.HttpResponse;
+import com.linecorp.armeria.server.ServiceRequestContext;
+import com.linecorp.armeria.server.annotation.Blocking;
+import com.linecorp.armeria.server.annotation.Post;
+import com.linecorp.armeria.server.graphql.GraphqlService;
 
-    private static final Logger logger = LoggerFactory.getLogger(GraphQLQueryHandler.class);
+import graphql.analysis.MaxQueryComplexityInstrumentation;
+import graphql.schema.GraphQLSchema;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
-    private static final String QUERY = "query";
-    private static final String VARIABLES = "variables";
-    private static final String DATA = "data";
-    private static final String ERRORS = "errors";
-    private static final String MESSAGE = "message";
+@Slf4j
+public class GraphQLQueryHandler {
+    private final ModuleManager moduleManager;
+    private final GraphqlService graphqlService;
 
-    private final Gson gson = new Gson();
-    private final Type mapOfStringObjectType = new TypeToken<Map<String, Object>>() {
-    }.getType();
+    @Getter(lazy = true)
+    private final HistogramMetrics queryHistogram =
+        moduleManager.find(TelemetryModule.NAME)
+                     .provider()
+                     .getService(MetricsCreator.class)
+                     .createHistogramMetric(
+                            "graphql_query_latency", 
+                            "The processing latency of graphql query",
+                            MetricsTag.EMPTY_KEY,
+                            MetricsTag.EMPTY_VALUE);
+    @Getter(lazy = true)
+    private final CounterMetrics errorCount =
+        moduleManager.find(TelemetryModule.NAME)
+                     .provider()
+                     .getService(MetricsCreator.class)
+                     .createCounter(
+                             "graphql_query_error_count",
+                             "The error count of graphql query",
+                             MetricsTag.EMPTY_KEY,
+                             MetricsTag.EMPTY_VALUE);
 
-    private final String path;
+    public GraphQLQueryHandler(
+        final ModuleManager moduleManager,
+        final GraphQLQueryConfig config,
+        final GraphQLSchema schema) {
+        final int allowedComplexity = config.getMaxQueryComplexity();
 
-    private final GraphQL graphQL;
+        this.moduleManager = moduleManager;
 
-    @Override
-    public String pathSpec() {
-        return path;
+        graphqlService =
+            GraphqlService
+                .builder()
+                .schema(schema)
+                .instrumentation(new MaxQueryComplexityInstrumentation(allowedComplexity, info -> {
+                    log.warn(
+                        "Aborting query because it's too complex, maximum allowed is [{}] but was [{}]",
+                        allowedComplexity,
+                        info.getComplexity());
+                    return true;
+                }))
+                .build();
     }
 
-    @Override
-    protected JsonElement doGet(HttpServletRequest req) {
-        throw new UnsupportedOperationException("GraphQL only supports POST method");
-    }
-
-    @Override
-    protected JsonElement doPost(HttpServletRequest req) throws IOException {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(req.getInputStream()));
-        String line;
-        StringBuilder request = new StringBuilder();
-        while ((line = reader.readLine()) != null) {
-            request.append(line);
-        }
-
-        JsonObject requestJson = gson.fromJson(request.toString(), JsonObject.class);
-
-        return execute(requestJson.get(QUERY)
-                                  .getAsString(), gson.fromJson(requestJson.get(VARIABLES), mapOfStringObjectType));
-    }
-
-    private JsonObject execute(String request, Map<String, Object> variables) {
-        try {
-            ExecutionInput executionInput = ExecutionInput.newExecutionInput()
-                                                          .query(request)
-                                                          .variables(variables)
-                                                          .build();
-            ExecutionResult executionResult = graphQL.execute(executionInput);
-            logger.debug("Execution result is {}", executionResult);
-            Object data = executionResult.getData();
-            List<GraphQLError> errors = executionResult.getErrors();
-            JsonObject jsonObject = new JsonObject();
-            if (data != null) {
-                jsonObject.add(DATA, gson.fromJson(gson.toJson(data), JsonObject.class));
-            }
-
-            if (CollectionUtils.isNotEmpty(errors)) {
-                JsonArray errorArray = new JsonArray();
-                errors.forEach(error -> {
-                    JsonObject errorJson = new JsonObject();
-                    errorJson.addProperty(MESSAGE, error.getMessage());
-                    errorArray.add(errorJson);
-                });
-                jsonObject.add(ERRORS, errorArray);
-            }
-            return jsonObject;
-        } catch (final Throwable e) {
-            logger.error(e.getMessage(), e);
-            JsonObject jsonObject = new JsonObject();
-            JsonArray errorArray = new JsonArray();
-            JsonObject errorJson = new JsonObject();
-            errorJson.addProperty(MESSAGE, e.getMessage());
-            errorArray.add(errorJson);
-            jsonObject.add(ERRORS, errorArray);
-            return jsonObject;
+    @Blocking
+    @Post("/graphql")
+    public HttpResponse graphql(
+        final ServiceRequestContext ctx,
+        final HttpRequest req) throws Exception {
+        try (final var ignored = getQueryHistogram().createTimer()) {
+            return graphqlService.serve(ctx, req);
+        } catch (Exception e) {
+            getErrorCount().inc();
+            throw e;
         }
     }
 }

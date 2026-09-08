@@ -18,48 +18,65 @@
 
 package org.apache.skywalking.oap.server.cluster.plugin.kubernetes;
 
+import org.apache.skywalking.oap.server.core.CoreModule;
 import org.apache.skywalking.oap.server.core.cluster.ClusterModule;
-import org.apache.skywalking.oap.server.core.cluster.ClusterNodesQuery;
-import org.apache.skywalking.oap.server.core.cluster.ClusterRegister;
-import org.apache.skywalking.oap.server.library.module.ServiceNotProvidedException;
-import org.junit.Before;
-import org.junit.Test;
+import org.apache.skywalking.oap.server.library.module.ModuleManager;
+import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
+import org.apache.skywalking.oap.server.telemetry.none.NoneTelemetryProvider;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.Mockito;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.apache.skywalking.oap.server.testing.util.ReflectUtil;
 
-import static org.hamcrest.core.Is.is;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertThat;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
+@ExtendWith(MockitoExtension.class)
 public class ClusterModuleKubernetesProviderTest {
 
-    private ClusterModuleKubernetesProvider provider;
+    private ClusterModuleKubernetesProvider provider = new ClusterModuleKubernetesProvider();
 
-    @Before
-    public void setUp() {
-        provider = new ClusterModuleKubernetesProvider();
+    @Mock
+    private ModuleManager moduleManager;
+    @Mock
+    private NoneTelemetryProvider telemetryProvider;
+
+    @BeforeEach
+    public void before() {
+        final var config = new ClusterModuleKubernetesConfig();
+        config.setLabelSelector("app=oap");
+        TelemetryModule telemetryModule = Mockito.spy(TelemetryModule.class);
+        ReflectUtil.setInternalState(telemetryModule, "loadedProvider", telemetryProvider);
+        provider.setManager(moduleManager);
+        ReflectUtil.setInternalState(provider, "config", config);
     }
 
     @Test
-    public void assertName() {
-        assertThat(provider.name(), is("kubernetes"));
+    public void name() {
+        assertEquals("kubernetes", provider.name());
     }
 
     @Test
-    public void assertModule() {
-        assertTrue(provider.module().isAssignableFrom(ClusterModule.class));
+    public void module() {
+        assertEquals(ClusterModule.class, provider.module());
     }
 
     @Test
-    public void assertCreateConfigBeanIfAbsent() {
-        assertTrue(ClusterModuleKubernetesConfig.class.isInstance(provider.createConfigBeanIfAbsent()));
-    }
-
-    @Test
-    public void assertPrepare() throws ServiceNotProvidedException {
+    public void prepare() {
         provider.prepare();
-        ClusterRegister register = provider.getService(ClusterRegister.class);
-        ClusterNodesQuery query = provider.getService(ClusterNodesQuery.class);
-        assertSame(register, query);
-        assertTrue(KubernetesCoordinator.class.isInstance(register));
+    }
+
+    @Test
+    public void notifyAfterCompleted() {
+        provider.notifyAfterCompleted();
+    }
+
+    @Test
+    public void requiredModules() {
+        String[] modules = provider.requiredModules();
+        assertArrayEquals(new String[] {CoreModule.NAME}, modules);
     }
 }

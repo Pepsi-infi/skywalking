@@ -18,51 +18,124 @@
 
 package org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base;
 
-import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.skywalking.library.elasticsearch.response.Documents;
+import org.apache.skywalking.library.elasticsearch.response.search.SearchResponse;
+import org.apache.skywalking.oap.server.core.analysis.DownSampling;
+import org.apache.skywalking.oap.server.core.analysis.TimeBucket;
 import org.apache.skywalking.oap.server.core.analysis.metrics.Metrics;
 import org.apache.skywalking.oap.server.core.storage.IMetricsDAO;
-import org.apache.skywalking.oap.server.core.storage.StorageBuilder;
+import org.apache.skywalking.oap.server.core.storage.SessionCacheCallback;
 import org.apache.skywalking.oap.server.core.storage.model.Model;
+import org.apache.skywalking.oap.server.core.storage.type.StorageBuilder;
 import org.apache.skywalking.oap.server.library.client.elasticsearch.ElasticSearchClient;
 import org.apache.skywalking.oap.server.library.client.request.InsertRequest;
 import org.apache.skywalking.oap.server.library.client.request.UpdateRequest;
-import org.elasticsearch.action.search.SearchResponse;
-import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.joda.time.DateTime;
 
+@Slf4j
 public class MetricsEsDAO extends EsDAO implements IMetricsDAO {
-
     protected final StorageBuilder<Metrics> storageBuilder;
 
-    protected MetricsEsDAO(ElasticSearchClient client, StorageBuilder<Metrics> storageBuilder) {
+    public MetricsEsDAO(ElasticSearchClient client,
+                           StorageBuilder<Metrics> storageBuilder) {
         super(client);
         this.storageBuilder = storageBuilder;
     }
 
     @Override
-    public List<Metrics> multiGet(Model model, List<String> ids) throws IOException {
-        SearchResponse response = getClient().ids(model.getName(), ids.toArray(new String[0]));
+    public List<Metrics> multiGet(Model model, List<Metrics> metrics) {
+        Map<String, List<Metrics>> groupIndices = new HashMap<>();
+        List<Metrics> result = new ArrayList<>(metrics.size());
 
-        List<Metrics> result = new ArrayList<>((int) response.getHits().totalHits);
-        for (int i = 0; i < response.getHits().totalHits; i++) {
-            Metrics source = storageBuilder.map2Data(response.getHits().getAt(i).getSourceAsMap());
-            result.add(source);
+        if (model.isTimeRelativeID()) {
+            metrics.forEach(metric -> {
+                // Try to use with timestamp index name(write index),
+                String indexName = TimeSeriesUtils.writeIndexName(model, metric.getTimeBucket());
+                groupIndices.computeIfAbsent(indexName, v -> new ArrayList<>()).add(metric);
+            });
+
+            Map<String, List<String>> indexIdsGroup = new HashMap<>();
+            groupIndices.forEach((tableName, metricList) -> {
+                List<String> ids = metricList.stream()
+                                             .map(item -> IndexController.INSTANCE.generateDocId(model, item.id().build()))
+                                             .collect(Collectors.toList());
+                indexIdsGroup.put(tableName, ids);
+            });
+            if (!indexIdsGroup.isEmpty()) {
+                final Optional<Documents> response = getClient().ids(indexIdsGroup);
+                response.ifPresent(documents -> documents.forEach(document -> {
+                    Metrics source = storageBuilder.storage2Entity(new ElasticSearchConverter.ToEntity(model.getName(), document.getSource()));
+                    result.add(source);
+                }));
+            }
+        } else {
+            metrics.forEach(metric -> {
+                // Metadata level metrics, always use alias name, due to the physical index of the records
+                // can't be located through timestamp.
+                String indexName = IndexController.INSTANCE.getTableName(model);
+                groupIndices.computeIfAbsent(indexName, v -> new ArrayList<>()).add(metric);
+            });
+            groupIndices.forEach((tableName, metricList) -> {
+                List<String> ids = metricList.stream()
+                                             .map(item -> IndexController.INSTANCE.generateDocId(model, item.id().build()))
+                                             .collect(Collectors.toList());
+                final SearchResponse response = getClient().searchIDs(tableName, ids);
+                response.getHits().getHits().forEach(hit -> {
+                    Metrics source = storageBuilder.storage2Entity(new ElasticSearchConverter.ToEntity(model.getName(), hit.getSource()));
+                    result.add(source);
+                });
+            });
         }
         return result;
     }
 
     @Override
-    public InsertRequest prepareBatchInsert(Model model, Metrics metrics) throws IOException {
-        XContentBuilder builder = map2builder(storageBuilder.data2Map(metrics));
+    public InsertRequest prepareBatchInsert(Model model, Metrics metrics, SessionCacheCallback callback) {
+        final ElasticSearchConverter.ToStorage toStorage = new ElasticSearchConverter.ToStorage(model.getName());
+        storageBuilder.entity2Storage(metrics, toStorage);
+        Map<String, Object> builder = IndexController.INSTANCE.appendTableColumn(model, toStorage.obtain());
         String modelName = TimeSeriesUtils.writeIndexName(model, metrics.getTimeBucket());
-        return getClient().prepareInsert(modelName, metrics.id(), builder);
+        String id = IndexController.INSTANCE.generateDocId(model, metrics.id().build());
+        return new MetricIndexRequestWrapper(getClient().prepareInsert(modelName, id, builder), callback);
     }
 
     @Override
-    public UpdateRequest prepareBatchUpdate(Model model, Metrics metrics) throws IOException {
-        XContentBuilder builder = map2builder(storageBuilder.data2Map(metrics));
+    public UpdateRequest prepareBatchUpdate(Model model, Metrics metrics, SessionCacheCallback callback) {
+        final ElasticSearchConverter.ToStorage toStorage = new ElasticSearchConverter.ToStorage(model.getName());
+        storageBuilder.entity2Storage(metrics, toStorage);
+        Map<String, Object> builder =
+            IndexController.INSTANCE.appendTableColumn(model, toStorage.obtain());
         String modelName = TimeSeriesUtils.writeIndexName(model, metrics.getTimeBucket());
-        return getClient().prepareUpdate(modelName, metrics.id(), builder);
+        String id = IndexController.INSTANCE.generateDocId(model, metrics.id().build());
+        return new MetricIndexUpdateWrapper(getClient().prepareUpdate(modelName, id, builder), callback);
+    }
+
+    @Override
+    public boolean isExpiredCache(final Model model,
+                                  final Metrics cachedValue,
+                                  final long currentTimeMillis,
+                                  final int ttl) {
+        final long metricTimestamp = TimeBucket.getTimestamp(
+            cachedValue.getTimeBucket(), model.getDownsampling());
+        // Fast fail check. If the duration is still less than TTL - 1 days(absolute)
+        // the cache should not be expired.
+        if (currentTimeMillis - metricTimestamp < TimeUnit.DAYS.toMillis(ttl - 1)) {
+            return false;
+        }
+        final long deadline = Long.parseLong(new DateTime(currentTimeMillis).plusDays(-ttl).toString("yyyyMMdd"));
+        final long timeBucket = TimeBucket.getTimeBucket(metricTimestamp, DownSampling.Day);
+        // If time bucket is earlier or equals(mostly) the deadline, then the cached metric is expired.
+        if (timeBucket <= deadline) {
+            return true;
+        }
+        return false;
     }
 }

@@ -18,6 +18,8 @@
 
 package org.apache.skywalking.oap.server.core.analysis;
 
+import com.google.common.base.Charsets;
+import com.google.common.hash.Hashing;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import lombok.EqualsAndHashCode;
@@ -26,6 +28,7 @@ import lombok.RequiredArgsConstructor;
 import org.apache.skywalking.oap.server.core.Const;
 import org.apache.skywalking.oap.server.core.UnexpectedException;
 import org.apache.skywalking.oap.server.library.util.BooleanUtils;
+import org.apache.skywalking.oap.server.library.util.StringUtil;
 
 /**
  * IDManager includes all ID encode/decode functions for service, service instance and endpoint.
@@ -36,18 +39,19 @@ public class IDManager {
      */
     public static class ServiceID {
         /**
-         * @return encoded service id
+         * @param name     service name
+         * @param isNormal `true` represents this service is detected by an agent. `false` represents this service is
+         *                 conjectured by telemetry data collected from agents on/in the `normal` service.
          */
-        public static String buildId(String name, NodeType type) {
-            return buildId(name, type.equals(NodeType.Normal));
-        }
-
         public static String buildId(String name, boolean isNormal) {
+            if (StringUtil.isBlank(name)) {
+                name = Const.BLANK_ENTITY_NAME;
+            }
             return encode(name) + Const.SERVICE_ID_CONNECTOR + BooleanUtils.booleanToValue(isNormal);
         }
 
         /**
-         * @return service ID object decoded from {@link #buildId(String, NodeType)} result
+         * @return service ID object decoded from {@link #buildId(String, boolean)} result
          */
         public static ServiceIDDefinition analysisId(String id) {
             final String[] strings = id.split(Const.SERVICE_ID_PARSER_SPLIT);
@@ -65,6 +69,15 @@ public class IDManager {
          */
         public static String buildRelationId(ServiceRelationDefine define) {
             return define.sourceId + Const.RELATION_ID_CONNECTOR + define.destId;
+        }
+
+        /**
+         * @return encoded service hierarchy relation id
+         */
+        public static String buildServiceHierarchyRelationId(ServiceHierarchyRelationDefine define) {
+            return define.serviceId + Const.SERVICE_ID_CONNECTOR + define.serviceLayer.value() +
+                Const.RELATION_ID_CONNECTOR +
+                define.relatedServiceId + Const.SERVICE_ID_CONNECTOR + define.relatedServiceLayer.value();
         }
 
         /**
@@ -96,6 +109,16 @@ public class IDManager {
             private final String sourceId;
             private final String destId;
         }
+
+        @RequiredArgsConstructor
+        @Getter
+        @EqualsAndHashCode
+        public static class ServiceHierarchyRelationDefine {
+            private final String serviceId;
+            private final Layer serviceLayer;
+            private final String relatedServiceId;
+            private final Layer relatedServiceLayer;
+        }
     }
 
     /**
@@ -103,10 +126,13 @@ public class IDManager {
      */
     public static class ServiceInstanceID {
         /**
-         * @param serviceId built by {@link ServiceID#buildId(String, NodeType)}
+         * @param serviceId built by {@link ServiceID#buildId(String, boolean)}
          * @return service instance id
          */
         public static String buildId(String serviceId, String instanceName) {
+            if (StringUtil.isBlank(instanceName)) {
+                instanceName = Const.BLANK_ENTITY_NAME;
+            }
             return serviceId
                 + Const.ID_CONNECTOR
                 + encode(instanceName);
@@ -134,6 +160,15 @@ public class IDManager {
         }
 
         /**
+         * @return encoded instance hierarchy relation id
+         */
+        public static String buildInstanceHierarchyRelationId(InstanceHierarchyRelationDefine define) {
+            return define.instanceId + Const.SERVICE_ID_CONNECTOR + define.serviceLayer.value() +
+                Const.RELATION_ID_CONNECTOR +
+                define.relatedInstanceId + Const.SERVICE_ID_CONNECTOR + define.relatedServiceLayer.value();
+        }
+
+        /**
          * @return service instance relation ID object decoded from {@link #buildRelationId(ServiceInstanceRelationDefine)}
          * result
          */
@@ -149,7 +184,7 @@ public class IDManager {
         @Getter
         public static class InstanceIDDefinition {
             /**
-             * Built by {@link ServiceID#buildId(String, NodeType)}
+             * Built by {@link ServiceID#buildId(String, boolean)}
              */
             private final String serviceId;
             private final String name;
@@ -168,6 +203,16 @@ public class IDManager {
              */
             private final String destId;
         }
+
+        @RequiredArgsConstructor
+        @Getter
+        @EqualsAndHashCode
+        public static class InstanceHierarchyRelationDefine {
+            private final String instanceId;
+            private final Layer serviceLayer;
+            private final String relatedInstanceId;
+            private final Layer relatedServiceLayer;
+        }
     }
 
     /**
@@ -175,10 +220,13 @@ public class IDManager {
      */
     public static class EndpointID {
         /**
-         * @param serviceId built by {@link ServiceID#buildId(String, NodeType)}
+         * @param serviceId built by {@link ServiceID#buildId(String, boolean)}
          * @return endpoint id
          */
         public static String buildId(String serviceId, String endpointName) {
+            if (StringUtil.isBlank(endpointName)) {
+                endpointName = Const.BLANK_ENTITY_NAME;
+            }
             return serviceId
                 + Const.ID_CONNECTOR
                 + encode(endpointName);
@@ -231,7 +279,7 @@ public class IDManager {
         @Getter
         public static class EndpointIDDefinition {
             /**
-             * Built by {@link ServiceID#buildId(String, NodeType)}
+             * Built by {@link ServiceID#buildId(String, boolean)}
              */
             private final String serviceId;
             private final String endpointName;
@@ -242,15 +290,60 @@ public class IDManager {
         @EqualsAndHashCode
         public static class EndpointRelationDefine {
             /**
-             * Built by {@link ServiceID#buildId(String, NodeType)}
+             * Built by {@link ServiceID#buildId(String, boolean)}
              */
             private final String sourceServiceId;
             private final String source;
             /**
-             * Built by {@link ServiceID#buildId(String, NodeType)}
+             * Built by {@link ServiceID#buildId(String, boolean)}
              */
             private final String destServiceId;
             private final String dest;
+        }
+    }
+
+    /**
+     * Process ID related functions.
+     */
+    public static class ProcessID {
+        /**
+         * @param instanceId built by {@link ServiceInstanceID#buildId(String, String)}
+         * @param name       process name
+         * @return process id
+         */
+        public static String buildId(String instanceId, String name) {
+            if (StringUtil.isBlank(name)) {
+                name = Const.BLANK_ENTITY_NAME;
+            }
+            return Hashing.sha256().newHasher().putString(String.format("%s_%s",
+                                                                        name, instanceId
+            ), Charsets.UTF_8).hash().toString();
+        }
+
+        /**
+         * @return encoded process relation id
+         */
+        public static String buildRelationId(ProcessRelationDefine define) {
+            return define.sourceId + Const.RELATION_ID_CONNECTOR + define.destId;
+        }
+
+        /**
+         * @return process relation ID object decoded from {@link #buildRelationId(ProcessRelationDefine)} result
+         */
+        public static ProcessRelationDefine analysisRelationId(String entityId) {
+            String[] parts = entityId.split(Const.RELATION_ID_PARSER_SPLIT);
+            if (parts.length != 2) {
+                throw new RuntimeException("Illegal Process Relation entity id");
+            }
+            return new ProcessRelationDefine(parts[0], parts[1]);
+        }
+
+        @RequiredArgsConstructor
+        @Getter
+        @EqualsAndHashCode
+        public static class ProcessRelationDefine {
+            private final String sourceId;
+            private final String destId;
         }
     }
 
@@ -275,14 +368,14 @@ public class IDManager {
 
     /**
      * @param text normal literal string
-     * @return Base74 encoded UTF-8 string
+     * @return Base64 encoded UTF-8 string
      */
     private static String encode(String text) {
         return new String(Base64.getEncoder().encode(text.getBytes(StandardCharsets.UTF_8)), StandardCharsets.UTF_8);
     }
 
     /**
-     * @param base64text Base74 encoded UTF-8 string
+     * @param base64text Base64 encoded UTF-8 string
      * @return normal literal string
      */
     private static String decode(String base64text) {

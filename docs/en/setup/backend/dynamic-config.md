@@ -1,16 +1,9 @@
 # Dynamic Configuration
-SkyWalking Configurations mostly are set through `application.yml` and OS system environment variables.
-But some of them are supporting dynamic settings from upstream management system.
+SkyWalking Configurations are mostly set through `application.yml` and OS system environment variables.
 
-Right now, SkyWalking supports following dynamic configurations.
+At the same time, some of them support dynamic settings from an upstream management system.
 
-| Config Key | Value Description | Value Format Example |
-|:----:|:----:|:----:|
-|receiver-trace.default.slowDBAccessThreshold| Thresholds of slow Database statement, override `receiver-trace/default/slowDBAccessThreshold` of `applciation.yml`. | default:200,mongodb:50|
-|receiver-trace.default.uninstrumentedGateways| The uninstrumented gateways, override `gateways.yml`. | same as [`gateways.yml`](uninstrumented-gateways.md#configuration-format) |
-|alarm.default.alarm-settings| The alarm settings, will override `alarm-settings.yml`. | same as [`alarm-settings.yml`](backend-alarm.md) |
-|core.default.apdexThreshold| The apdex threshold settings, will override `service-apdex-threshold.yml`. | same as [`service-apdex-threshold.yml`](apdex-threshold.md) |
-
+Currently, SkyWalking supports two types of dynamic configurations: Single and Group.
 
 This feature depends on upstream service, so it is **DISABLED** by default.
 
@@ -18,106 +11,62 @@ This feature depends on upstream service, so it is **DISABLED** by default.
 configuration:
   selector: ${SW_CONFIGURATION:none}
   none:
-  apollo:
-    apolloMeta: http://106.12.25.204:8080
-    apolloCluster: default
-    appId: skywalking
-    period: 5
+  grpc:
+    host: ${SW_DCS_SERVER_HOST:""}
+    port: ${SW_DCS_SERVER_PORT:80}
+    clusterName: ${SW_DCS_CLUSTER_NAME:SkyWalking}
+    period: ${SW_DCS_PERIOD:20}
   # ... other implementations
 ```
-
-## Dynamic Configuration Service, DCS
-[Dynamic Configuration Service](../../../../oap-server/server-configuration/grpc-configuration-sync/src/main/proto/configuration-service.proto) 
-is a gRPC service, which requires the upstream system implemented.
-The SkyWalking OAP fetches the configuration from the implementation(any system), after you open this implementation like this.
-
-```yaml
-configuration:
-  selector: ${SW_CONFIGURATION:grpc}
-  grpc:
-    host: 127.0.0.1
-    port: 9555
+## Single Configuration
+Single Configuration is a config key that corresponds to a specific config value. The logic structure is:
 ```
-
-## Dynamic Configuration Apollo Implementation
-
-[Apollo](https://github.com/ctripcorp/apollo/) is also supported as DCC(Dynamic Configuration Center), to use it, just configured as follows:
-
-```yaml
-configuration:
-  selector: ${SW_CONFIGURATION:apollo}
-  apollo:
-    apolloMeta: <your apollo meta address>
-    apolloCluster: default
-    appId: skywalking
-    period: 5
+{configKey}:{configValue}
 ```
-
-## Dynamic Configuration Nacos Implementation
-
-[Nacos](https://github.com/alibaba/nacos) is also supported as DCC(Dynamic Configuration Center), to use it, please configure as follows:
-
-```yaml
-configuration:
-  selector: ${SW_CONFIGURATION:nacos}
-  nacos:
-    serverAddr: 127.0.0.1
-    port: 8848
-    group: 'skywalking'
-    namespace: ''
-    period : 60
-    clusterName: "default"
-  # ... other configurations
+For example:
 ```
-
-
-## Dynamic Configuration Zookeeper Implementation
-
-[Zookeeper](https://github.com/apache/zookeeper) is also supported as DCC(Dynamic Configuration Center), to use it, please configure as follows:
-
-```yaml
-configuration:
-  selector: ${SW_CONFIGURATION:zookeeper}
-  zookeeper:
-    period : 60 # Unit seconds, sync period. Default fetch every 60 seconds.
-    nameSpace: /default
-    hostPort: localhost:2181
-    baseSleepTimeMs: 1000 # initial amount of time to wait between retries
-    maxRetries: 3 # max number of times to retry
-  # ... other configurations
+{agent-analyzer.default.slowDBAccessThreshold}:{default:200,mongodb:50}
 ```
+Supported configurations are as follows:
 
-## Dynamic Configuration Etcd Implementation
+| Config Key | Value Description | Value Format Example |
+|:----:|:----:|:----:|
+|agent-analyzer.default.slowDBAccessThreshold| Thresholds of slow Database statement. Overrides `agent-analyzer/default/slowDBAccessThreshold` of `application.yml`. | default:200,mongodb:50|
+|agent-analyzer.default.uninstrumentedGateways| The uninstrumented gateways. Overrides `gateways.yml`. | Same as [`gateways.yml`](uninstrumented-gateways.md#configuration-format). |
+|alarm.default.alarm-settings| The alarm settings. Overrides `alarm-settings.yml`. | Same as [`alarm-settings.yml`](backend-alarm.md). |
+|core.default.apdexThreshold| The apdex threshold settings. Overrides `service-apdex-threshold.yml`. | Same as [`service-apdex-threshold.yml`](apdex-threshold.md). |
+|core.default.endpoint-name-grouping| The endpoint name grouping setting. Overrides `endpoint-name-grouping.yml`. | Same as [`endpoint-name-grouping.yml`](endpoint-grouping-rules.md). |
+|core.default.log4j-xml| The log4j xml configuration. Overrides `log4j2.xml`. | Same as [`log4j2.xml`](dynamical-logging.md). |
+|core.default.searchableTracesTags| The searchableTracesTags configuration. Override `core/default/searchableTracesTags` in the `application.yml`. | http.method,http.status_code,rpc.status_code,db.type,db.instance,mq.queue,mq.topic,mq.broker |
+|agent-analyzer.default.traceSamplingPolicy| The sampling policy for default and service dimension, override `trace-sampling-policy-settings.yml`. | same as [`trace-sampling-policy-settings.yml`](trace-sampling.md) | 
+|configuration-discovery.default.agentConfigurations| The ConfigurationDiscovery settings. | See [`configuration-discovery.md`](https://skywalking.apache.org/docs/skywalking-java/next/en/setup/service-agent/java-agent/configuration-discovery/). |
 
-[Etcd](https://github.com/etcd-io/etcd) is also supported as DCC(Dynamic Configuration Center), to use it, please configure as follows:
-
-```yaml
-configuration:
-  selector: ${SW_CONFIGURATION:etcd}
-  etcd:
-    period : 60 # Unit seconds, sync period. Default fetch every 60 seconds.
-    group :  'skywalking'
-    serverAddr: localhost:2379
-    clusterName: "default"
-  # ... other configurations
+## Group Configuration
+Group Configuration is a config key corresponding to a group sub config item. A sub config item is a key-value pair. The logic structure is:
 ```
-
-## Dynamic Configuration Consul Implementation
-
-[Consul](https://github.com/rickfast/consul-client) is also supported as DCC(Dynamic Configuration Center), to use it, please configure as follows:
-
-```yaml
-configuration:
-  selector: ${SW_CONFIGURATION:consul}
-  consul:
-    # Consul host and ports, separated by comma, e.g. 1.2.3.4:8500,2.3.4.5:8500
-    hostAndPorts: 127.0.0.1:8500
-    # Sync period in seconds. Defaults to 60 seconds.
-    period: 60
-    # aclToken of connection consul (optional)
-    aclToken: ${consul.aclToken}
-  # ... other configurations
+{configKey}: |{subItemkey1}:{subItemValue1}
+             |{subItemkey2}:{subItemValue2}
+             |{subItemkey3}:{subItemValue3}
+             ...      
 ```
+For example:
+```
+{core.default.endpoint-name-grouping-openapi}:|{customerAPI-v1}:{value of customerAPI-v1}
+                                              |{productAPI-v1}:{value of productAPI-v1}
+                                              |{productAPI-v2}:{value of productAPI-v2}
+                                              
+```
+Supported configurations are as follows:
 
+| Config Key | SubItem Key Description |  Value Description | Value Format Example |
+|:----:|:----:|:----:|:----:|
+|core.default.endpoint-name-grouping-openapi|The serviceName relevant to openAPI definition file. eg. `serviceA`. If the serviceName relevant to multiple files should add subItems for each files, and each subItem key should split serviceName and fileName with `.` eg. `serviceA.API-file1`,`serviceA.API-file2` |The openAPI definitions file contents(yaml format) for create endpoint name grouping rules.|Same as [`productAPI-v2.yaml`](endpoint-grouping-rules.md)|
 
-
+## Dynamic Configuration Implementations
+- [Dynamic Configuration Service, DCS](./dynamic-config-service.md)
+- [Zookeeper Implementation](./dynamic-config-zookeeper.md)
+- [Etcd Implementation](./dynamic-config-etcd.md)
+- [Consul Implementation](./dynamic-config-consul.md)
+- [Apollo Implementation](./dynamic-config-apollo.md)
+- [Kubernetes Configmap Implementation](./dynamic-config-configmap.md)
+- [Nacos Implementation](./dynamic-config-nacos.md)

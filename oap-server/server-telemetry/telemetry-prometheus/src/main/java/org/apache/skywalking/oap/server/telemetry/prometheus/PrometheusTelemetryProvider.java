@@ -18,10 +18,7 @@
 
 package org.apache.skywalking.oap.server.telemetry.prometheus;
 
-import io.prometheus.client.exporter.HTTPServer;
 import io.prometheus.client.hotspot.DefaultExports;
-import java.io.IOException;
-import org.apache.skywalking.oap.server.library.module.ModuleConfig;
 import org.apache.skywalking.oap.server.library.module.ModuleDefine;
 import org.apache.skywalking.oap.server.library.module.ModuleProvider;
 import org.apache.skywalking.oap.server.library.module.ModuleStartException;
@@ -29,17 +26,13 @@ import org.apache.skywalking.oap.server.library.module.ServiceNotProvidedExcepti
 import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
 import org.apache.skywalking.oap.server.telemetry.api.MetricsCollector;
 import org.apache.skywalking.oap.server.telemetry.api.MetricsCreator;
-import org.apache.skywalking.oap.server.telemetry.none.MetricsCollectorNoop;
+import org.apache.skywalking.oap.server.telemetry.prometheus.httpserver.HttpServer;
 
 /**
  * Start the Prometheus
  */
 public class PrometheusTelemetryProvider extends ModuleProvider {
     private PrometheusConfig config;
-
-    public PrometheusTelemetryProvider() {
-        config = new PrometheusConfig();
-    }
 
     @Override
     public String name() {
@@ -52,17 +45,27 @@ public class PrometheusTelemetryProvider extends ModuleProvider {
     }
 
     @Override
-    public ModuleConfig createConfigBeanIfAbsent() {
-        return config;
+    public ConfigCreator newConfigCreator() {
+        return new ConfigCreator<PrometheusConfig>() {
+            @Override
+            public Class type() {
+                return PrometheusConfig.class;
+            }
+
+            @Override
+            public void onInitialized(final PrometheusConfig initialized) {
+                config = initialized;
+            }
+        };
     }
 
     @Override
     public void prepare() throws ServiceNotProvidedException, ModuleStartException {
         this.registerServiceImplementation(MetricsCreator.class, new PrometheusMetricsCreator());
-        this.registerServiceImplementation(MetricsCollector.class, new MetricsCollectorNoop());
+        this.registerServiceImplementation(MetricsCollector.class, new PrometheusMetricsCollector());
         try {
-            new HTTPServer(config.getHost(), config.getPort());
-        } catch (IOException e) {
+            new HttpServer(config).start();
+        } catch (InterruptedException e) {
             throw new ModuleStartException(e.getMessage(), e);
         }
 

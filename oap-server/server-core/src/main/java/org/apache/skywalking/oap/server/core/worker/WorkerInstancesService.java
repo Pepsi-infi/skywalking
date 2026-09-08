@@ -21,6 +21,7 @@ package org.apache.skywalking.oap.server.core.worker;
 import java.util.HashMap;
 import java.util.Map;
 import org.apache.skywalking.oap.server.core.UnexpectedException;
+import org.apache.skywalking.oap.server.core.analysis.worker.MetricStreamKind;
 import org.apache.skywalking.oap.server.core.remote.data.StreamData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,7 +30,7 @@ import org.slf4j.LoggerFactory;
  * Worker Instance Service hosts all remote handler workers with the stream data type.
  */
 public class WorkerInstancesService implements IWorkerInstanceSetter, IWorkerInstanceGetter {
-    private static final Logger logger = LoggerFactory.getLogger(WorkerInstancesService.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(WorkerInstancesService.class);
 
     private final Map<String, RemoteHandleWorker> instances;
 
@@ -44,11 +45,19 @@ public class WorkerInstancesService implements IWorkerInstanceSetter, IWorkerIns
 
     @Override
     public void put(String remoteReceiverWorkName, AbstractWorker instance,
-        Class<? extends StreamData> streamDataClass) {
+                    MetricStreamKind kind, Class<? extends StreamData> streamDataClass) {
         if (instances.containsKey(remoteReceiverWorkName)) {
             throw new UnexpectedException("Duplicate worker name:" + remoteReceiverWorkName);
         }
-        instances.put(remoteReceiverWorkName, new RemoteHandleWorker(instance, streamDataClass));
-        logger.debug("Worker {} has been registered as {}", instance.toString(), remoteReceiverWorkName);
+        instances.put(remoteReceiverWorkName, new RemoteHandleWorker(instance, kind, streamDataClass));
+        LOGGER.debug("Worker {} has been registered as {}", instance.toString(), remoteReceiverWorkName);
+    }
+
+    @Override
+    public void remove(String remoteReceiverWorkName) {
+        final RemoteHandleWorker removed = instances.remove(remoteReceiverWorkName);
+        if (removed != null) {
+            LOGGER.debug("Worker {} has been deregistered", remoteReceiverWorkName);
+        }
     }
 }

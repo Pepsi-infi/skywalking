@@ -21,27 +21,34 @@ package org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query;
 import com.google.common.base.Strings;
 import java.io.IOException;
 import java.util.List;
-import org.apache.skywalking.apm.util.StringUtil;
-import org.apache.skywalking.oap.server.core.Const;
+import org.apache.skywalking.library.elasticsearch.requests.search.BoolQueryBuilder;
+import org.apache.skywalking.library.elasticsearch.requests.search.Query;
+import org.apache.skywalking.library.elasticsearch.requests.search.Search;
+import org.apache.skywalking.library.elasticsearch.requests.search.SearchBuilder;
+import org.apache.skywalking.library.elasticsearch.requests.search.Sort;
+import org.apache.skywalking.library.elasticsearch.response.search.SearchHit;
+import org.apache.skywalking.library.elasticsearch.response.search.SearchResponse;
+import org.apache.skywalking.oap.server.core.analysis.IDManager;
 import org.apache.skywalking.oap.server.core.analysis.manual.log.AbstractLogRecord;
+import org.apache.skywalking.oap.server.core.analysis.manual.log.LogRecord;
+import org.apache.skywalking.oap.server.core.analysis.manual.searchtag.Tag;
 import org.apache.skywalking.oap.server.core.analysis.record.Record;
+import org.apache.skywalking.oap.server.core.query.enumeration.Order;
+import org.apache.skywalking.oap.server.core.query.input.Duration;
+import org.apache.skywalking.oap.server.core.query.input.TraceScopeCondition;
 import org.apache.skywalking.oap.server.core.query.type.ContentType;
 import org.apache.skywalking.oap.server.core.query.type.Log;
-import org.apache.skywalking.oap.server.core.query.type.LogState;
 import org.apache.skywalking.oap.server.core.query.type.Logs;
-import org.apache.skywalking.oap.server.core.query.type.Pagination;
 import org.apache.skywalking.oap.server.core.storage.query.ILogQueryDAO;
 import org.apache.skywalking.oap.server.library.client.elasticsearch.ElasticSearchClient;
-import org.apache.skywalking.oap.server.library.util.BooleanUtils;
+import org.apache.skywalking.oap.server.library.util.CollectionUtils;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.EsDAO;
-import org.elasticsearch.action.search.SearchResponse;
-import org.elasticsearch.index.query.BoolQueryBuilder;
-import org.elasticsearch.index.query.QueryBuilder;
-import org.elasticsearch.index.query.QueryBuilders;
-import org.elasticsearch.search.SearchHit;
-import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.IndexController;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.MatchCNameBuilder;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.TimeRangeIndexNameGenerator;
 
-import static org.apache.skywalking.oap.server.core.analysis.manual.log.AbstractLogRecord.TRACE_ID;
+import static java.util.Objects.nonNull;
+import static org.apache.skywalking.oap.server.library.util.StringUtil.isNotEmpty;
 
 public class LogQueryEsDAO extends EsDAO implements ILogQueryDAO {
     public LogQueryEsDAO(ElasticSearchClient client) {
@@ -49,73 +56,128 @@ public class LogQueryEsDAO extends EsDAO implements ILogQueryDAO {
     }
 
     @Override
-    public Logs queryLogs(String metricName, int serviceId, int serviceInstanceId, String endpointId, String traceId,
-                          LogState state, String stateCode, Pagination paging, int from, int limit, long startSecondTB,
-                          long endSecondTB) throws IOException {
-        SearchSourceBuilder sourceBuilder = SearchSourceBuilder.searchSource();
+    public boolean supportQueryLogsByKeywords() {
+        return true;
+    }
 
-        BoolQueryBuilder boolQueryBuilder = QueryBuilders.boolQuery();
-        sourceBuilder.query(boolQueryBuilder);
-        List<QueryBuilder> mustQueryList = boolQueryBuilder.must();
-
+    @Override
+    public Logs queryLogs(final String serviceId,
+                          final String serviceInstanceId,
+                          final String endpointId,
+                          final TraceScopeCondition relatedTrace,
+                          final Order queryOrder,
+                          final int from,
+                          final int limit,
+                          final Duration duration,
+                          final List<Tag> tags,
+                          final List<String> keywordsOfContent,
+                          final List<String> excludingKeywordsOfContent) throws IOException {
+        long startSecondTB = 0;
+        long endSecondTB = 0;
+        if (nonNull(duration)) {
+            startSecondTB = duration.getStartTimeBucketInSec();
+            endSecondTB = duration.getEndTimeBucketInSec();
+        }
+        final BoolQueryBuilder query = Query.bool();
+        if (IndexController.LogicIndicesRegister.isMergedTable(LogRecord.INDEX_NAME)) {
+            query.must(Query.term(IndexController.LogicIndicesRegister.RECORD_TABLE_NAME, LogRecord.INDEX_NAME));
+        }
         if (startSecondTB != 0 && endSecondTB != 0) {
-            mustQueryList.add(QueryBuilders.rangeQuery(Record.TIME_BUCKET).gte(startSecondTB).lte(endSecondTB));
+            query.must(Query.range(Record.TIME_BUCKET).gte(startSecondTB).lte(endSecondTB));
+        }
+        if (isNotEmpty(serviceId)) {
+            query.must(Query.term(AbstractLogRecord.SERVICE_ID, serviceId));
+        }
+        if (isNotEmpty(serviceInstanceId)) {
+            query.must(Query.term(AbstractLogRecord.SERVICE_INSTANCE_ID, serviceInstanceId));
+        }
+        if (isNotEmpty(endpointId)) {
+            query.must(Query.term(AbstractLogRecord.ENDPOINT_ID, endpointId));
+        }
+        if (nonNull(relatedTrace)) {
+            if (isNotEmpty(relatedTrace.getTraceId())) {
+                query.must(Query.term(AbstractLogRecord.TRACE_ID, relatedTrace.getTraceId()));
+            }
+            if (isNotEmpty(relatedTrace.getSegmentId())) {
+                query.must(
+                    Query.term(AbstractLogRecord.TRACE_SEGMENT_ID, relatedTrace.getSegmentId()));
+            }
+            if (nonNull(relatedTrace.getSpanId())) {
+                query.must(Query.term(AbstractLogRecord.SPAN_ID, relatedTrace.getSpanId()));
+            }
         }
 
-        if (serviceId != Const.NONE) {
-            boolQueryBuilder.must().add(QueryBuilders.termQuery(AbstractLogRecord.SERVICE_ID, serviceId));
-        }
-        if (serviceInstanceId != Const.NONE) {
-            boolQueryBuilder.must()
-                            .add(QueryBuilders.termQuery(AbstractLogRecord.SERVICE_INSTANCE_ID, serviceInstanceId));
-        }
-        if (StringUtil.isNotEmpty(endpointId)) {
-            boolQueryBuilder.must().add(QueryBuilders.termQuery(AbstractLogRecord.ENDPOINT_ID, endpointId));
-        }
-        if (!Strings.isNullOrEmpty(stateCode)) {
-            boolQueryBuilder.must().add(QueryBuilders.termQuery(AbstractLogRecord.STATUS_CODE, stateCode));
-        }
-        if (!Strings.isNullOrEmpty(traceId)) {
-            boolQueryBuilder.must().add(QueryBuilders.termQuery(TRACE_ID, traceId));
-        }
-        if (LogState.ERROR.equals(state)) {
-            boolQueryBuilder.must()
-                            .add(
-                                QueryBuilders.termQuery(AbstractLogRecord.IS_ERROR, BooleanUtils.booleanToValue(true)));
-        } else if (LogState.SUCCESS.equals(state)) {
-            boolQueryBuilder.must()
-                            .add(QueryBuilders.termQuery(
-                                AbstractLogRecord.IS_ERROR,
-                                BooleanUtils.booleanToValue(false)
-                            ));
+        if (CollectionUtils.isNotEmpty(tags)) {
+            tags.forEach(tag -> query.must(Query.term(AbstractLogRecord.TAGS, tag.toString())));
         }
 
-        sourceBuilder.size(limit);
-        sourceBuilder.from(from);
+        if (CollectionUtils.isNotEmpty(keywordsOfContent)) {
+            keywordsOfContent.forEach(
+                content ->
+                    query.must(
+                        Query.matchPhrase(
+                            MatchCNameBuilder.INSTANCE.build(AbstractLogRecord.CONTENT),
+                            content
+                        )
+                    )
+            );
+        }
 
-        SearchResponse response = getClient().search(metricName, sourceBuilder);
+        if (CollectionUtils.isNotEmpty(excludingKeywordsOfContent)) {
+            excludingKeywordsOfContent.forEach(
+                content ->
+                    query.mustNot(
+                        Query.matchPhrase(
+                            MatchCNameBuilder.INSTANCE.build(AbstractLogRecord.CONTENT),
+                            content
+                        )
+                    )
+            );
+        }
+
+        final SearchBuilder search =
+            Search.builder().query(query)
+                  .sort(
+                      LogRecord.TIMESTAMP,
+                      Order.DES.equals(queryOrder) ?
+                          Sort.Order.DESC : Sort.Order.ASC
+                  )
+                  .size(limit)
+                  .from(from);
+
+        SearchResponse response = searchDebuggable(new TimeRangeIndexNameGenerator(
+            IndexController.LogicIndicesRegister.getPhysicalTableName(LogRecord.INDEX_NAME),
+            startSecondTB,
+            endSecondTB
+        ), search.build());
 
         Logs logs = new Logs();
-        logs.setTotal((int) response.getHits().totalHits);
 
         for (SearchHit searchHit : response.getHits().getHits()) {
             Log log = new Log();
-            log.setServiceId((String) searchHit.getSourceAsMap().get(AbstractLogRecord.SERVICE_ID));
-            log.setServiceInstanceId((String) searchHit.getSourceAsMap()
+            log.setServiceId((String) searchHit.getSource().get(AbstractLogRecord.SERVICE_ID));
+            log.setServiceInstanceId((String) searchHit.getSource()
                                                        .get(AbstractLogRecord.SERVICE_INSTANCE_ID));
-            log.setEndpointId((String) searchHit.getSourceAsMap().get(AbstractLogRecord.ENDPOINT_ID));
-            log.setEndpointName((String) searchHit.getSourceAsMap().get(AbstractLogRecord.ENDPOINT_NAME));
-            log.setError(BooleanUtils.valueToBoolean(((Number) searchHit.getSourceAsMap()
-                                                                        .get(AbstractLogRecord.IS_ERROR)).intValue()));
-            log.setStatusCode((String) searchHit.getSourceAsMap().get(AbstractLogRecord.STATUS_CODE));
-            log.setContentType(ContentType.instanceOf(((Number) searchHit.getSourceAsMap()
-                                                                         .get(
-                                                                             AbstractLogRecord.CONTENT_TYPE)).intValue()));
-            log.setContent((String) searchHit.getSourceAsMap().get(AbstractLogRecord.CONTENT));
-
+            log.setEndpointId(
+                (String) searchHit.getSource().get(AbstractLogRecord.ENDPOINT_ID));
+            if (log.getEndpointId() != null) {
+                log.setEndpointName(
+                    IDManager.EndpointID.analysisId(log.getEndpointId()).getEndpointName());
+            }
+            log.setTraceId((String) searchHit.getSource().get(AbstractLogRecord.TRACE_ID));
+            log.setTimestamp(
+                ((Number) searchHit.getSource().get(AbstractLogRecord.TIMESTAMP)).longValue());
+            log.setContentType(ContentType.instanceOf(
+                ((Number) searchHit.getSource()
+                                   .get(AbstractLogRecord.CONTENT_TYPE)).intValue()));
+            log.setContent((String) searchHit.getSource().get(AbstractLogRecord.CONTENT));
+            String dataBinaryBase64 =
+                (String) searchHit.getSource().get(AbstractLogRecord.TAGS_RAW_DATA);
+            if (!Strings.isNullOrEmpty(dataBinaryBase64)) {
+                parserDataBinary(dataBinaryBase64, log.getTags());
+            }
             logs.getLogs().add(log);
         }
-
         return logs;
     }
 }

@@ -20,23 +20,127 @@ package org.apache.skywalking.oap.server.core.storage.query;
 
 import java.io.IOException;
 import java.util.List;
+import javax.annotation.Nullable;
+import org.apache.skywalking.oap.server.core.analysis.manual.searchtag.Tag;
 import org.apache.skywalking.oap.server.core.analysis.manual.segment.SegmentRecord;
+import org.apache.skywalking.oap.server.core.query.input.Duration;
 import org.apache.skywalking.oap.server.core.query.type.QueryOrder;
 import org.apache.skywalking.oap.server.core.query.type.Span;
 import org.apache.skywalking.oap.server.core.query.type.TraceBrief;
 import org.apache.skywalking.oap.server.core.query.type.TraceState;
+import org.apache.skywalking.oap.server.core.query.type.debugging.DebuggingSpan;
+import org.apache.skywalking.oap.server.core.query.type.debugging.DebuggingTraceContext;
 import org.apache.skywalking.oap.server.library.module.Service;
 
 public interface ITraceQueryDAO extends Service {
 
-    TraceBrief queryBasicTraces(long startSecondTB, long endSecondTB, long minDuration, long maxDuration,
-        String endpointName, String serviceId, String serviceInstanceId, String endpointId, String traceId, int limit, int from,
-        TraceState traceState, QueryOrder queryOrder) throws IOException;
-
-    List<SegmentRecord> queryByTraceId(String traceId) throws IOException;
+    default TraceBrief queryBasicTracesDebuggable(Duration duration,
+                                                  long minDuration,
+                                                  long maxDuration,
+                                                  String serviceId,
+                                                  String serviceInstanceId,
+                                                  String endpointId,
+                                                  String traceId,
+                                                  int limit,
+                                                  int from,
+                                                  TraceState traceState,
+                                                  QueryOrder queryOrder,
+                                                  final List<Tag> tags) throws IOException {
+        DebuggingTraceContext traceContext = DebuggingTraceContext.TRACE_CONTEXT.get();
+        DebuggingSpan span = null;
+        try {
+            StringBuilder builder = new StringBuilder();
+            if (traceContext != null) {
+                span = traceContext.createSpan("Query Dao: queryBasicTraces");
+                builder.append("Condition: Duration: ")
+                       .append(duration)
+                       .append(", MinDuration: ")
+                       .append(minDuration)
+                       .append(", MaxDuration: ")
+                       .append(maxDuration)
+                       .append(", ServiceId: ")
+                       .append(serviceId)
+                       .append(", ServiceInstanceId: ")
+                       .append(serviceInstanceId)
+                       .append(", EndpointId: ")
+                       .append(endpointId)
+                       .append(", TraceId: ")
+                       .append(traceId)
+                       .append(", Limit: ")
+                       .append(limit)
+                       .append(", From: ")
+                       .append(from)
+                       .append(", TraceState: ")
+                       .append(traceState)
+                       .append(", QueryOrder: ")
+                       .append(queryOrder)
+                       .append(", Tags: ")
+                       .append(tags);
+                span.setMsg(builder.toString());
+            }
+            return queryBasicTraces(
+                duration, minDuration, maxDuration, serviceId, serviceInstanceId, endpointId, traceId, limit, from,
+                traceState, queryOrder, tags
+            );
+        } finally {
+            if (traceContext != null && span != null) {
+                traceContext.stopSpan(span);
+            }
+        }
+    }
 
     /**
-     * This method gives more flexible for unnative
+     * @param duration nullable unless for BanyanDB query from cold stage
+     */
+    default List<SegmentRecord> queryByTraceIdDebuggable(String traceId, @Nullable Duration duration) throws IOException {
+        DebuggingTraceContext traceContext = DebuggingTraceContext.TRACE_CONTEXT.get();
+        DebuggingSpan span = null;
+        try {
+            StringBuilder builder = new StringBuilder();
+            if (traceContext != null) {
+                span = traceContext.createSpan("Query Dao: queryByTraceId");
+                builder.append("Condition: TraceId: ")
+                       .append(traceId);
+                span.setMsg(builder.toString());
+            }
+            return queryByTraceId(traceId, duration);
+        } finally {
+            if (traceContext != null && span != null) {
+                traceContext.stopSpan(span);
+            }
+        }
+    }
+
+    TraceBrief queryBasicTraces(Duration duration,
+                                long minDuration,
+                                long maxDuration,
+                                String serviceId,
+                                String serviceInstanceId,
+                                String endpointId,
+                                String traceId,
+                                int limit,
+                                int from,
+                                TraceState traceState,
+                                QueryOrder queryOrder,
+                                final List<Tag> tags) throws IOException;
+
+    /**
+     * @param duration nullable unless for BanyanDB query from cold stage
+     */
+    List<SegmentRecord> queryByTraceId(String traceId, @Nullable Duration duration) throws IOException;
+
+    /**
+     * @param duration nullable unless for BanyanDB query
+     */
+    List<SegmentRecord> queryBySegmentIdList(List<String> segmentIdList, @Nullable Duration duration) throws IOException;
+
+    /**
+     * @param duration nullable unless for BanyanDB query from cold stage
+     */
+    List<SegmentRecord> queryByTraceIdWithInstanceId(List<String> traceIdList, List<String> instanceIdList, @Nullable Duration duration) throws IOException;
+
+    /**
+     * This method gives more flexible for 3rd trace without segment concept, which can't search data through {@link #queryByTraceId(String, Duration)}
      */
     List<Span> doFlexibleTraceQuery(String traceId) throws IOException;
 }

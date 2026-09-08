@@ -19,15 +19,12 @@
 package org.apache.skywalking.oap.server.tool.profile.exporter.test;
 
 import org.apache.skywalking.apm.network.language.profile.v3.ThreadStack;
-import org.apache.skywalking.oap.server.core.analysis.manual.segment.SegmentRecord;
-import org.apache.skywalking.oap.server.core.profile.ProfileThreadSnapshotRecord;
-import org.apache.skywalking.oap.server.core.query.type.BasicTrace;
-import org.apache.skywalking.oap.server.core.storage.profile.IProfileThreadSnapshotQueryDAO;
+import org.apache.skywalking.oap.server.core.profiling.trace.ProfileThreadSnapshotRecord;
+import org.apache.skywalking.oap.server.core.storage.profiling.trace.IProfileThreadSnapshotQueryDAO;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 
 public class ProfileExportSnapshotDAO implements IProfileThreadSnapshotQueryDAO {
@@ -39,13 +36,16 @@ public class ProfileExportSnapshotDAO implements IProfileThreadSnapshotQueryDAO 
     }
 
     @Override
-    public List<BasicTrace> queryProfiledSegments(String taskId) throws IOException {
-        final BasicTrace basicTrace = new BasicTrace();
-        basicTrace.setSegmentId(exportedData.getSegmentId());
-        basicTrace.getTraceIds().add(exportedData.getTraceId());
-        basicTrace.setStart(exportedData.getSpans().get(0).getStart() + "");
-        basicTrace.setDuration(exportedData.getSpans().get(0).getEnd());
-        return Collections.singletonList(basicTrace);
+    public List<ProfileThreadSnapshotRecord> queryRecords(String taskId)  throws IOException {
+        ProfileThreadSnapshotRecord record = new ProfileThreadSnapshotRecord();
+        record.setTaskId(taskId);
+        record.setSegmentId(exportedData.getSegmentId());
+        record.setSequence(0);
+        record.setDumpTime(System.currentTimeMillis());
+        final ThreadStack.Builder stack = ThreadStack.newBuilder().addAllCodeSignatures(Arrays.asList(exportedData.getSnapshots().get(0).split("-")));
+        record.setStackBinary(stack.build().toByteArray());
+
+        return Arrays.asList(record);
     }
 
     @Override
@@ -85,8 +85,4 @@ public class ProfileExportSnapshotDAO implements IProfileThreadSnapshotQueryDAO 
         return records;
     }
 
-    @Override
-    public SegmentRecord getProfiledSegment(String segmentId) throws IOException {
-        return null;
-    }
 }

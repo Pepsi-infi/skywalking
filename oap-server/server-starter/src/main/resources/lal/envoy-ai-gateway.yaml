@@ -1,0 +1,93 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Envoy AI Gateway access log processing via OTLP.
+#
+# Two rules: one for LLM route logs, one for MCP route logs.
+# LLM sampling: persist error responses (>= 400), upstream failures, or high-token requests (>= 10000).
+# MCP sampling: only persist error responses (>= 400).
+# Both tag ai_route_type for searchable filtering in the UI.
+
+rules:
+  - name: envoy-ai-gateway-llm-access-log
+    layer: ENVOY_AI_GATEWAY
+    dsl: |
+      filter {
+        // Only process LLM route logs (gen_ai.request.model is always set for LLM routes, even on errors)
+        if (tag("gen_ai.request.model") == "" || tag("gen_ai.request.model") == "-") {
+          abort {}
+        }
+
+        // Keep: error responses (>= 400), upstream failures, or high-token requests (>= 10000 total tokens)
+        // Abort logs without response_code unless there is an upstream failure
+        if (tag("response_code") == "" || tag("response_code") == "-") {
+          if (tag("upstream_transport_failure_reason") == "" || tag("upstream_transport_failure_reason") == "-") {
+            abort {}
+          }
+        }
+        // For normal responses (< 400), check upstream failure and token cost
+        if (tag("response_code") != "" && tag("response_code") != "-") {
+          if (tag("response_code") as Integer < 400) {
+            if (tag("upstream_transport_failure_reason") != "" && tag("upstream_transport_failure_reason") != "-") {
+              // upstream failure — keep
+            }
+            if (tag("upstream_transport_failure_reason") == "" || tag("upstream_transport_failure_reason") == "-") {
+              // no upstream failure — check token cost
+              if (tag("gen_ai.usage.input_tokens") != "" && tag("gen_ai.usage.input_tokens") != "-"
+                  && tag("gen_ai.usage.output_tokens") != "" && tag("gen_ai.usage.output_tokens") != "-") {
+                if ((tag("gen_ai.usage.input_tokens") as Integer) + (tag("gen_ai.usage.output_tokens") as Integer) < 10000) {
+                  abort {}
+                }
+              }
+              if (tag("gen_ai.usage.input_tokens") == "" || tag("gen_ai.usage.input_tokens") == "-"
+                  || tag("gen_ai.usage.output_tokens") == "" || tag("gen_ai.usage.output_tokens") == "-") {
+                abort {}
+              }
+            }
+          }
+        }
+
+        extractor {
+          tag 'ai_route_type': "llm"
+        }
+
+        sink {
+        }
+      }
+
+  - name: envoy-ai-gateway-mcp-access-log
+    layer: ENVOY_AI_GATEWAY
+    dsl: |
+      filter {
+        // Only process MCP route logs
+        if (tag("mcp.method.name") == "" || tag("mcp.method.name") == "-") {
+          abort {}
+        }
+
+        // Only persist error responses (>= 400)
+        if (tag("response_code") == "" || tag("response_code") == "-") {
+          abort {}
+        }
+        if (tag("response_code") as Integer < 400) {
+          abort {}
+        }
+
+        extractor {
+          tag 'ai_route_type': "mcp"
+        }
+
+        sink {
+        }
+      }

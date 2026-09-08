@@ -18,16 +18,17 @@
 
 package org.apache.skywalking.oap.server.receiver.trace.provider.handler.v8.grpc;
 
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.skywalking.apm.network.common.v3.Commands;
+import org.apache.skywalking.apm.network.language.agent.v3.SegmentCollection;
 import org.apache.skywalking.apm.network.language.agent.v3.SegmentObject;
 import org.apache.skywalking.apm.network.language.agent.v3.TraceSegmentReportServiceGrpc;
+import org.apache.skywalking.oap.server.analyzer.module.AnalyzerModule;
+import org.apache.skywalking.oap.server.analyzer.provider.trace.parser.ISegmentParserService;
 import org.apache.skywalking.oap.server.library.module.ModuleManager;
 import org.apache.skywalking.oap.server.library.server.grpc.GRPCHandler;
-import org.apache.skywalking.oap.server.receiver.trace.provider.TraceServiceModuleConfig;
-import org.apache.skywalking.oap.server.receiver.trace.provider.parser.SegmentParserListenerManager;
-import org.apache.skywalking.oap.server.receiver.trace.provider.parser.TraceAnalyzer;
 import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
 import org.apache.skywalking.oap.server.telemetry.api.CounterMetrics;
 import org.apache.skywalking.oap.server.telemetry.api.HistogramMetrics;
@@ -36,18 +37,16 @@ import org.apache.skywalking.oap.server.telemetry.api.MetricsTag;
 
 @Slf4j
 public class TraceSegmentReportServiceHandler extends TraceSegmentReportServiceGrpc.TraceSegmentReportServiceImplBase implements GRPCHandler {
-    private final ModuleManager moduleManager;
-    private final SegmentParserListenerManager listenerManager;
-    private final TraceServiceModuleConfig config;
     private HistogramMetrics histogram;
     private CounterMetrics errorCounter;
 
-    public TraceSegmentReportServiceHandler(ModuleManager moduleManager,
-                                            SegmentParserListenerManager listenerManager,
-                                            TraceServiceModuleConfig config) {
-        this.moduleManager = moduleManager;
-        this.listenerManager = listenerManager;
-        this.config = config;
+    private ISegmentParserService segmentParserService;
+
+    public TraceSegmentReportServiceHandler(ModuleManager moduleManager) {
+        this.segmentParserService = moduleManager.find(AnalyzerModule.NAME)
+                                                 .provider()
+                                                 .getService(ISegmentParserService.class);
+
         MetricsCreator metricsCreator = moduleManager.find(TelemetryModule.NAME)
                                                      .provider()
                                                      .getService(MetricsCreator.class);
@@ -66,16 +65,15 @@ public class TraceSegmentReportServiceHandler extends TraceSegmentReportServiceG
             @Override
             public void onNext(SegmentObject segment) {
                 if (log.isDebugEnabled()) {
-                    log.debug("receive segment");
+                    log.debug("received segment in streaming");
                 }
 
                 HistogramMetrics.Timer timer = histogram.createTimer();
                 try {
-                    final TraceAnalyzer traceAnalyzer = new TraceAnalyzer(
-                        moduleManager, listenerManager, config);
-                    traceAnalyzer.doAnalysis(segment);
+                    segmentParserService.send(segment);
                 } catch (Exception e) {
                     errorCounter.inc();
+                    log.error(e.getMessage(), e);
                 } finally {
                     timer.finish();
                 }
@@ -83,8 +81,14 @@ public class TraceSegmentReportServiceHandler extends TraceSegmentReportServiceG
 
             @Override
             public void onError(Throwable throwable) {
+                Status status = Status.fromThrowable(throwable);
+                if (Status.CANCELLED.getCode() == status.getCode()) {
+                    if (log.isDebugEnabled()) {
+                        log.debug(throwable.getMessage(), throwable);
+                    }
+                    return;
+                }
                 log.error(throwable.getMessage(), throwable);
-                responseObserver.onCompleted();
             }
 
             @Override
@@ -93,5 +97,27 @@ public class TraceSegmentReportServiceHandler extends TraceSegmentReportServiceG
                 responseObserver.onCompleted();
             }
         };
+    }
+
+    @Override
+    public void collectInSync(final SegmentCollection request, final StreamObserver<Commands> responseObserver) {
+        if (log.isDebugEnabled()) {
+            log.debug("received {} segments", request.getSegmentsCount());
+        }
+
+        request.getSegmentsList().forEach(segment -> {
+            HistogramMetrics.Timer timer = histogram.createTimer();
+            try {
+                segmentParserService.send(segment);
+            } catch (Exception e) {
+                errorCounter.inc();
+                log.error(e.getMessage(), e);
+            } finally {
+                timer.finish();
+            }
+        });
+
+        responseObserver.onNext(Commands.newBuilder().build());
+        responseObserver.onCompleted();
     }
 }

@@ -22,7 +22,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * SelectedRecord is an abtract data element, including id, name, value and a reference id.
+ * SelectedRecord is an abstract data element, including id, name, value and a reference id.
  */
 @Setter
 @Getter
@@ -43,4 +43,8 @@ public class SelectedRecord {
      * Have value, Only if the record has related trace id. UI should show this as an attached value.
      */
     private String refId;
+    /**
+     * The owner entity of this record.
+     */
+    private Owner owner;
 }

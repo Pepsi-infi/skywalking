@@ -1,0 +1,67 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# No FODC proxy in this e2e: the collector scrapes each BanyanDB node's own :2121 Prometheus
+# endpoint directly and injects the identity labels the SWIP-15 MAL rules key on. On a real
+# FODC deployment these are stamped by the proxy; here they are static per-target scrape labels
+# (the same mechanism the previous single-node e2e used to inject host_name, extended to two
+# targets and the full identity set). The OTel Prometheus receiver maps the Prometheus `job` to
+# service.name, which OAP's receiver maps back to the `job_name` tag the rules filter on; all
+# other static labels arrive as datapoint attributes (tags). Hence:
+#   - one job_name "banyandb-monitoring" (matches the filter on all three rule files)
+#   - per-target: cluster (service key), container_name (role discriminator + instance key),
+#     node_role, pod_name, and node_type (the data node's tier; liaison has no tier, so it is set
+#     explicitly to 'n/a' here — matching the instance() closure default — so labeled liaison
+#     metrics carry node_type='n/a' rather than an empty string).
+receivers:
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: "banyandb-monitoring"
+          scrape_interval: 5s
+          static_configs:
+            - targets: ["liaison:2121"]
+              labels:
+                cluster: e2e-banyandb
+                container_name: liaison
+                node_role: ROLE_LIAISON
+                node_type: n/a
+                pod_name: banyandb-liaison-0
+            - targets: ["data-hot:2121"]
+              labels:
+                cluster: e2e-banyandb
+                container_name: data
+                node_role: ROLE_DATA
+                node_type: hot
+                pod_name: banyandb-data-hot-0
+
+processors:
+  batch:
+
+exporters:
+  otlp:
+    endpoint: oap:11800
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    metrics:
+      receivers:
+        - prometheus
+      processors:
+        - batch
+      exporters:
+        - otlp

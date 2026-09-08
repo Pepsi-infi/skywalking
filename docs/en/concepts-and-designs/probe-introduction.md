@@ -1,38 +1,53 @@
 # Probe Introduction
-In SkyWalking, probe means an agent or SDK library integrated into target system, which take charge of 
-collecting telemetry data including tracing and metrics. Based on the target system tech stack, probe could use very different
-ways to do so. But ultimately they are same, just collect and reformat data, then send to backend.
 
-In high level, there are three typical groups in all SkyWalking probes.
-- **Language based native agent**. This kind of agents runs in target service user space, like a part of user codes. Such as
-SkyWalking Java agent, use `-javaagent` command line argument to manipulate codes in runtime, `manipulate` means change and inject
-user's codes. Another kind of agents is using some hook or intercept mechanism provided by target libraries. So you can see, these kinds
-of agents based on languages and libraries.
- 
-- **Service Mesh probe**. Service Mesh probe collects data from sidecar, control panel in service mesh or proxy. In old days, proxy
-is only used as ingress of the whole cluster, but with the Service Mesh and sidecar, now we can do observe based on that.
- 
-- **3rd-party instrument library**. SkyWalking accepts other popular used instrument libraries data format. It analysis the
-data, transfer it to SkyWalking formats of trace, metrics or both. This feature starts with accepting Zipkin span data. See
-[Receiver for other tracers](../setup/backend/backend-receivers.md) to know more. 
+In SkyWalking, probe means an agent or SDK library integrated into a target system that takes charge of collecting
+telemetry data, including tracing and metrics. Depending on the target system tech stack, there are very different ways
+how the probe performs such tasks. But ultimately, they all work towards the same goal — to collect and reformat data,
+and then to send them to the backend.
 
-You don't need to use **Language based native agent** and **Service Mesh probe** at the same time, because they both collect
-metrics data. As a result of that, your system suffers twice payloads, and the analytic numbers are doubled.
+On a high level, there are four typical categories in all SkyWalking probes.
 
-There are several recommend ways in using these probes:
-1. Use **Language based native agent** only.
-1. Use **3rd-party instrument library** only, like Zipkin instrument ecosystem.
-1. Use **Service Mesh probe** only.
-1. Use **Service Mesh probe** with **Language based native agent** or **3rd-party instrument library** in tracing status. (Advanced usage)
+- **Language based native agent**. These agents run in target service user spaces, such as a part of user codes. For
+  example, the SkyWalking Java agent uses the `-javaagent` command line argument to manipulate codes in runtime,
+  where `manipulate` means to change and inject user's codes. Another example is SkyWalking agent, which leverage Golang
+  compiling mechanism to weaves codes in the compiling time. For some static compilation languages, such as C++, manual
+  library is the only choice.
+  As you can see, these agents are based on languages and libraries, no matter we provide auto instrument or manual agents.
 
-In addition, let's example what is the meaning of **in tracing status**?
+- **Service Mesh probes**. Service Mesh probes collect data from sidecar, control plane in service mesh or proxy. In the
+  old days, proxy is only used as an ingress of the whole cluster, but with the Service Mesh and sidecar, we can now
+  perform observability functions.
 
-In default, **Language based native agent** and **3rd-party instrument library** both send distributed traces to backend,
-which do analysis and aggregate on those traces. **In tracing status** means, backend considers these traces as something
-like logs, just save them, and build the links between traces and metrics, like `which endpoint and service does the trace belong?`.
+- **3rd-party instrument library**. SkyWalking accepts many widely used instrument libraries data formats. 
+  SkyWalking community is connected closely with Zipkin community, it could work as an alternative server for both v1 and
+  v2 Zipkin traces. Also, OTEL trace format in gRPC is supported, and converted to Zipkin format inside SkyWalking.
+  As an alternative Zipkin server, Zipkin lens UI could be used to visualize accepted traces when they are in Zipkin format.
+  See [Receiver for Zipkin traces](../setup/backend/zipkin-trace.md) and [Receiver for OTEL traces](../setup/backend/otlp-trace.md) for more information.
+
+- **eBPF agent**. The eBPF agent collects metrics and profiling the target service powered by the eBPF technology of Linux kernel.
+
+You don't have to install all probes to make SkyWalking up and running. 
+There are several recommended ways on how to use these probes:
+
+1. Use **Language based native agent** only to build topology and metrics for your business application.
+1. Use **3rd-party instrument library** only, like the Zipkin instrument ecosystem.
+1. Use **Service Mesh probe** if you prefer Service Mesh stack and don't want to use native agents.
+1. Use **Service Mesh probe** with **Language based native agent** or **3rd-party instrument library** in pure tracing
+   status. (Advanced usage)
+1. Use **eBPF agent** only if you only want to profile on demand and/or activating automatic performance analysis.
+1. Use **eBPF agent** with **Language based native agent** collaboratively. Enhance the traces with the eBPF agent to collect extra information.
+
+What is the meaning of **in tracing status**?
+
+By default, **Language based native agent** and **3rd-party instrument library** both send distributed traces to the
+backend, where analyses and aggregation on those traces are performed. **In pure tracing status** means that the backend
+considers these traces as something like logs. In other words, the backend saves them, but doesn't run the metrics analysis from
+traces. As a result, there would not have data of `service/instance/endpoint metrics and relationships`.
 
 ## What is next?
-- Learn the SkyWalking supported probes in [Service auto instrument agent](service-agent.md), [Manual instrument SDK](manual-sdk.md),
-[Service Mesh probe](service-mesh-probe.md) and [Zipkin receiver](trace-receiver.md).
-- After understand the probe, read [backend overview](backend-overview.md) for understanding analysis and persistence.
+
+- Learn more about the probes supported by SkyWalking in [Service auto instrument agent](service-agent.md)
+  , [Manual instrument SDK](manual-sdk.md) and [Zipkin receiver](../setup/backend/zipkin-trace.md).
+- After understanding how the probe works, see the [backend overview](backend-overview.md) for more on analysis and
+  persistence.
 

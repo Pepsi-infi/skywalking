@@ -20,7 +20,7 @@ package org.apache.skywalking.oap.server.core.alarm.provider;
 
 import java.util.ArrayList;
 import java.util.List;
-import org.apache.skywalking.oap.server.core.alarm.MetaInAlarm;
+import lombok.Getter;
 
 /**
  * This is a formatter especially for alarm message.
@@ -29,6 +29,7 @@ import org.apache.skywalking.oap.server.core.alarm.MetaInAlarm;
  * <p>
  * - Successful rate of endpoint {name} is lower than 75%
  */
+@Getter
 public class AlarmMessageFormatter {
     private List<String> formatSegments;
     private List<ValueFrom> valueFroms;
@@ -72,24 +73,24 @@ public class AlarmMessageFormatter {
         while (match);
     }
 
-    public String format(MetaInAlarm meta) {
+    public String format(AlarmEntity alarmEntity) {
         StringBuilder message = new StringBuilder();
         for (int i = 0; i < formatSegments.size(); i++) {
             message.append(formatSegments.get(i));
             if (i != formatSegments.size() - 1) {
                 switch (valueFroms.get(i)) {
                     case ID:
-                        message.append(meta.getId0());
+                        message.append(alarmEntity.getId0());
                         break;
                     case NAME:
-                        message.append(meta.getName());
+                        message.append(alarmEntity.getName());
                 }
             }
         }
         return message.toString();
     }
 
-    private enum ValueFrom {
+    public enum ValueFrom {
         ID, NAME
     }
 }

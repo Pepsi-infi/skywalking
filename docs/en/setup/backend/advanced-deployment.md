@@ -1,37 +1,41 @@
 # Advanced deployment
-OAP servers inter communicate with each other in a cluster environment. 
-In the cluster mode, you could run in different roles.
+OAP servers communicate with each other in a cluster environment to do distributed aggregation.
+In the cluster mode, all OAP nodes are running in Mixed mode by default.
+
+The available roles for OAP are,
 - Mixed(default)
 - Receiver
 - Aggregator
 
-In some time, users want to deploy cluster nodes with explicit role. Then could use this.
+Sometimes users may wish to deploy cluster nodes with a clearly defined role. They could then use this function.
 
 ## Mixed
-Default role, the OAP should take responsibilities of
-1. Receive agent traces or metrics.
-1. Do L1 aggregation
-1. Internal communication(send/receive)
-1. Do L2 aggregation
+By default, the OAP is responsible for:
+1. Receiving agent traces or metrics.
+1. L1 aggregation
+1. Internal communication (sending/receiving)
+1. L2 aggregation
 1. Persistence
 1. Alarm
 
 ## Receiver
-The OAP should take responsibilities of
-1. Receive agent traces or metrics.
-1. Do L1 aggregation
-1. Internal communication(send)
+The OAP is responsible for:
+1. Receiving agent traces or metrics.
+1. L1 aggregation
+1. Internal communication (sending)
 
 ## Aggregator
-The OAP should take responsibilities of
-1. Internal communication(receive)
-1. Do L2 aggregation
+The OAP is responsible for:
+1. Internal communication(receiving from Receiver and Mixed roles OAP)
+1. L2 aggregation
 1. Persistence
 1. Alarm
 
 ___
-These roles are designed for complex deployment requirements based on security and network policy.
+These roles are designed for complex deployment requirements on security and network policy.
 
 ## Kubernetes
-If you are using our native [Kubernetes coordinator](backend-cluster.md#kubernetes), the `labelSelector`
-setting is used for `Aggregator` choose rules. Choose the right OAP deployment based on your requirements.
+If you are using our native [Kubernetes coordinator](backend-cluster.md#kubernetes), and you insist to install OAP nodes
+with a clearly defined role. There should be two deployments for each role,
+one for receiver OAPs and the other for aggregator OAPs to separate different system environment settings. 
+Then, the `labelSelector` should be set for `Aggregator` role selection rules to choose the right OAP deployment based on your needs.

@@ -24,7 +24,11 @@ import org.apache.skywalking.oap.server.core.source.DefaultScopeDefine;
 public enum ScopeType {
     SERVICE(DefaultScopeDefine.SERVICE),
     SERVICE_INSTANCE(DefaultScopeDefine.SERVICE_INSTANCE),
-    ENDPOINT(DefaultScopeDefine.ENDPOINT);
+    ENDPOINT(DefaultScopeDefine.ENDPOINT),
+    PROCESS(DefaultScopeDefine.PROCESS),
+    SERVICE_RELATION(DefaultScopeDefine.SERVICE_RELATION),
+    PROCESS_RELATION(DefaultScopeDefine.PROCESS_RELATION),
+    SERVICE_INSTANCE_RELATION(DefaultScopeDefine.SERVICE_INSTANCE_RELATION);
 
     @Getter
     private final int scopeId;

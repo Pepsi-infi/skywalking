@@ -18,417 +18,458 @@
 
 package org.apache.skywalking.oap.server.library.client.elasticsearch;
 
-import com.google.common.base.Splitter;
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.security.KeyManagementException;
-import java.security.KeyStore;
-import java.security.KeyStoreException;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.CertificateException;
-import java.util.ArrayList;
-import java.util.Collections;
+import com.google.common.base.Stopwatch;
+import com.google.common.base.Strings;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Iterables;
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import javax.net.ssl.SSLContext;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.http.HttpEntity;
-import org.apache.http.HttpHost;
-import org.apache.http.HttpStatus;
-import org.apache.http.auth.AuthScope;
-import org.apache.http.auth.UsernamePasswordCredentials;
-import org.apache.http.client.CredentialsProvider;
-import org.apache.http.client.methods.HttpDelete;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.client.methods.HttpHead;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.client.methods.HttpPut;
-import org.apache.http.entity.ContentType;
-import org.apache.http.impl.client.BasicCredentialsProvider;
-import org.apache.http.nio.entity.NStringEntity;
-import org.apache.http.ssl.SSLContextBuilder;
-import org.apache.http.ssl.SSLContexts;
-import org.apache.skywalking.apm.util.StringUtil;
+import org.apache.skywalking.library.elasticsearch.requests.search.Query;
+import org.apache.skywalking.library.elasticsearch.response.Documents;
+import org.apache.skywalking.oap.server.library.module.ModuleManager;
+import org.apache.skywalking.oap.server.library.util.StringUtil;
+import org.apache.skywalking.library.elasticsearch.ElasticSearch;
+import org.apache.skywalking.library.elasticsearch.ElasticSearchBuilder;
+import org.apache.skywalking.library.elasticsearch.ElasticSearchVersion;
+import org.apache.skywalking.library.elasticsearch.bulk.BulkProcessor;
+import org.apache.skywalking.library.elasticsearch.requests.search.Search;
+import org.apache.skywalking.library.elasticsearch.requests.search.SearchParams;
+import org.apache.skywalking.library.elasticsearch.response.Document;
+import org.apache.skywalking.library.elasticsearch.response.Index;
+import org.apache.skywalking.library.elasticsearch.response.IndexTemplate;
+import org.apache.skywalking.library.elasticsearch.response.Mappings;
+import org.apache.skywalking.library.elasticsearch.response.search.SearchResponse;
 import org.apache.skywalking.oap.server.library.client.Client;
-import org.apache.skywalking.oap.server.library.client.request.InsertRequest;
-import org.apache.skywalking.oap.server.library.client.request.UpdateRequest;
-import org.elasticsearch.action.admin.indices.create.CreateIndexRequest;
-import org.elasticsearch.action.admin.indices.create.CreateIndexResponse;
-import org.elasticsearch.action.admin.indices.delete.DeleteIndexRequest;
-import org.elasticsearch.action.admin.indices.delete.DeleteIndexResponse;
-import org.elasticsearch.action.admin.indices.get.GetIndexRequest;
-import org.elasticsearch.action.bulk.BackoffPolicy;
-import org.elasticsearch.action.bulk.BulkProcessor;
-import org.elasticsearch.action.bulk.BulkRequest;
-import org.elasticsearch.action.bulk.BulkResponse;
-import org.elasticsearch.action.get.GetRequest;
-import org.elasticsearch.action.get.GetResponse;
-import org.elasticsearch.action.index.IndexRequest;
-import org.elasticsearch.action.search.SearchRequest;
-import org.elasticsearch.action.search.SearchResponse;
-import org.elasticsearch.action.support.ActiveShardCount;
-import org.elasticsearch.action.support.WriteRequest;
-import org.elasticsearch.client.Response;
-import org.elasticsearch.client.RestClient;
-import org.elasticsearch.client.RestClientBuilder;
-import org.elasticsearch.client.RestHighLevelClient;
-import org.elasticsearch.common.unit.TimeValue;
-import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentType;
-import org.elasticsearch.index.query.QueryBuilders;
-import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.apache.skywalking.oap.server.library.client.healthcheck.DelegatedHealthChecker;
+import org.apache.skywalking.oap.server.library.client.healthcheck.HealthCheckable;
+import org.apache.skywalking.oap.server.library.util.HealthChecker;
+import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
+import org.apache.skywalking.oap.server.telemetry.api.HistogramMetrics;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsCreator;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsTag;
 
 /**
  * ElasticSearchClient connects to the ES server by using ES client APIs.
  */
 @Slf4j
-public class ElasticSearchClient implements Client {
+public class ElasticSearchClient implements Client, HealthCheckable {
     public static final String TYPE = "type";
-    protected final String clusterNodes;
-    protected final String protocol;
+
+    private final String clusterNodes;
+
+    private final String protocol;
+
     private final String trustStorePath;
+
     @Setter
     private volatile String trustStorePass;
+
+    private final String keyStorePath;
+
+    @Setter
+    private volatile String keyStorePass;
+
     @Setter
     private volatile String user;
+
     @Setter
     private volatile String password;
-    private final List<IndexNameConverter> indexNameConverters;
-    protected volatile RestHighLevelClient client;
 
-    public ElasticSearchClient(String clusterNodes,
+    private final Function<String, String> indexNameConverter;
+
+    private final DelegatedHealthChecker healthChecker = new DelegatedHealthChecker();
+
+    private final int connectTimeout;
+
+    private final int socketTimeout;
+
+    private final int responseTimeout;
+
+    private final int numHttpClientThread;
+
+    private final AtomicReference<ElasticSearch> es = new AtomicReference<>();
+
+    private final ModuleManager moduleManager;
+    private HistogramMetrics singleWriteHistogram;
+    private HistogramMetrics singleUpdateHistogram;
+    private HistogramMetrics singleDeleteHistogram;
+    private HistogramMetrics bulkWriteHistogram;
+
+    public ElasticSearchClient(ModuleManager moduleManager,
+                               String clusterNodes,
                                String protocol,
                                String trustStorePath,
                                String trustStorePass,
+                               String keyStorePath,
+                               String keyStorePass,
                                String user,
                                String password,
-                               List<IndexNameConverter> indexNameConverters) {
+                               Function<String, String> indexNameConverter,
+                               int connectTimeout,
+                               int socketTimeout,
+                               int responseTimeout,
+                               int numHttpClientThread) {
+        this.moduleManager = moduleManager;
         this.clusterNodes = clusterNodes;
         this.protocol = protocol;
-        this.user = user;
-        this.password = password;
-        this.indexNameConverters = indexNameConverters;
         this.trustStorePath = trustStorePath;
         this.trustStorePass = trustStorePass;
+        this.keyStorePath = keyStorePath;
+        this.keyStorePass = keyStorePass;
+        this.user = user;
+        this.password = password;
+        this.indexNameConverter = indexNameConverter;
+        this.connectTimeout = connectTimeout;
+        this.socketTimeout = socketTimeout;
+        this.responseTimeout = responseTimeout;
+        this.numHttpClientThread = numHttpClientThread;
     }
 
     @Override
-    public void connect() throws IOException, KeyStoreException, NoSuchAlgorithmException, KeyManagementException, CertificateException {
-        List<HttpHost> hosts = parseClusterNodes(protocol, clusterNodes);
-        if (client != null) {
-            try {
-                client.close();
-            } catch (Throwable t) {
-                log.error("ElasticSearch client reconnection fails based on new config", t);
+    public void connect() {
+        initTelemetry();
+        final ElasticSearch oldOne = es.get();
+
+        final ElasticSearchBuilder cb =
+            ElasticSearch
+                .builder()
+                .endpoints(clusterNodes.split(","))
+                .protocol(protocol)
+                .connectTimeout(connectTimeout)
+                .responseTimeout(responseTimeout)
+                .socketTimeout(socketTimeout)
+                .numHttpClientThread(numHttpClientThread)
+                .healthyListener(healthy -> {
+                    if (healthy) {
+                        healthChecker.health();
+                    } else {
+                        healthChecker.unHealth("No healthy endpoint");
+                    }
+                });
+
+        if (!Strings.isNullOrEmpty(trustStorePath)) {
+            cb.trustStorePath(trustStorePath);
+            // Always set trustStorePass if trustStorePath is set (even if empty string)
+            if (trustStorePass != null) {
+                cb.trustStorePass(trustStorePass);
             }
         }
-        client = createClient(hosts);
-        client.ping();
-    }
+        if (!Strings.isNullOrEmpty(keyStorePath)) {
+            cb.keyStorePath(keyStorePath);
+            // Always set keyStorePass if keyStorePath is set (even if empty string)
+            if (keyStorePass != null) {
+                cb.keyStorePass(keyStorePass);
+            }
+        }
+        if (!Strings.isNullOrEmpty(user)) {
+            cb.username(user);
+        }
+        if (!Strings.isNullOrEmpty(password)) {
+            cb.password(password);
+        }
 
-    protected RestHighLevelClient createClient(
-        final List<HttpHost> pairsList) throws KeyStoreException, IOException, NoSuchAlgorithmException, CertificateException, KeyManagementException {
-        RestClientBuilder builder;
-        if (StringUtil.isNotEmpty(user) && StringUtil.isNotEmpty(password)) {
-            final CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
-            credentialsProvider.setCredentials(AuthScope.ANY, new UsernamePasswordCredentials(user, password));
-
-            if (StringUtil.isEmpty(trustStorePath)) {
-                builder = RestClient.builder(pairsList.toArray(new HttpHost[0]))
-                                    .setHttpClientConfigCallback(
-                                        httpClientBuilder -> httpClientBuilder.setDefaultCredentialsProvider(
-                                            credentialsProvider));
+        final var newOne = cb.build();
+        final var stopWatch = Stopwatch.createStarted();
+        // Only swap the old / new after the new one established a new connection.
+        final CompletableFuture<ElasticSearchVersion> f = newOne.connect();
+        f.whenComplete((ignored, exception) -> {
+            stopWatch.stop();
+            if (exception != null) {
+                log.error("Failed to recreate ElasticSearch client based on config", exception);
+                return;
+            }
+            final var connectingTime = stopWatch.elapsed(TimeUnit.MILLISECONDS);
+            if (connectingTime > 1000) {
+                log.warn(
+                    "Connecting to ElasticSearch took {} ms, which is longer than expected and can impact performance.",
+                    connectingTime);
+            }
+            if (es.compareAndSet(oldOne, newOne)) {
+                oldOne.close();
             } else {
-                KeyStore truststore = KeyStore.getInstance("jks");
-                try (InputStream is = Files.newInputStream(Paths.get(trustStorePath))) {
-                    truststore.load(is, trustStorePass.toCharArray());
-                }
-                SSLContextBuilder sslBuilder = SSLContexts.custom().loadTrustMaterial(truststore, null);
-                final SSLContext sslContext = sslBuilder.build();
-                builder = RestClient.builder(pairsList.toArray(new HttpHost[0]))
-                                    .setHttpClientConfigCallback(
-                                        httpClientBuilder -> httpClientBuilder.setDefaultCredentialsProvider(
-                                            credentialsProvider)
-                                                                              .setSSLContext(sslContext));
+                newOne.close();
             }
-        } else {
-            builder = RestClient.builder(pairsList.toArray(new HttpHost[0]));
-        }
-
-        return new RestHighLevelClient(builder);
+        });
+        f.join();
     }
 
     @Override
-    public void shutdown() throws IOException {
-        client.close();
+    public void shutdown() {
+        es.get().close();
     }
 
-    public static List<HttpHost> parseClusterNodes(String protocol, String nodes) {
-        List<HttpHost> httpHosts = new LinkedList<>();
-        log.info("elasticsearch cluster nodes: {}", nodes);
-        List<String> nodesSplit = Splitter.on(",").omitEmptyStrings().splitToList(nodes);
+    @Override
+    public void registerChecker(HealthChecker healthChecker) {
+        this.healthChecker.register(healthChecker);
+    }
 
-        for (String node : nodesSplit) {
-            String host = node.split(":")[0];
-            String port = node.split(":")[1];
-            httpHosts.add(new HttpHost(host, Integer.parseInt(port), protocol));
+    public boolean createIndex(String indexName) {
+        return createIndex(indexName, null, null);
+    }
+
+    public boolean createIndex(String indexName,
+                               Mappings mappings,
+                               Map<String, ?> settings) {
+        indexName = indexNameConverter.apply(indexName);
+
+        return es.get().index().create(indexName, mappings, settings);
+    }
+
+    public boolean updateIndexMapping(String indexName, Mappings mapping) {
+        indexName = indexNameConverter.apply(indexName);
+
+        return es.get().index().putMapping(indexName, TYPE, mapping);
+    }
+
+    public Optional<Index> getIndex(String indexName) {
+        if (StringUtil.isBlank(indexName)) {
+            return Optional.empty();
         }
-
-        return httpHosts;
+        indexName = indexNameConverter.apply(indexName);
+        return es.get().index().get(indexName);
     }
 
-    public boolean createIndex(String indexName) throws IOException {
-        indexName = formatIndexName(indexName);
+    public Collection<String> retrievalIndexByAliases(String alias) {
+        alias = indexNameConverter.apply(alias);
 
-        CreateIndexRequest request = new CreateIndexRequest(indexName);
-        CreateIndexResponse response = client.indices().create(request);
-        log.debug("create {} index finished, isAcknowledged: {}", indexName, response.isAcknowledged());
-        return response.isAcknowledged();
-    }
-
-    public boolean createIndex(String indexName, Map<String, Object> settings,
-                               Map<String, Object> mapping) throws IOException {
-        indexName = formatIndexName(indexName);
-        CreateIndexRequest request = new CreateIndexRequest(indexName);
-        Gson gson = new Gson();
-        request.settings(gson.toJson(settings), XContentType.JSON);
-        request.mapping(TYPE, gson.toJson(mapping), XContentType.JSON);
-        CreateIndexResponse response = client.indices().create(request);
-        log.debug("create {} index finished, isAcknowledged: {}", indexName, response.isAcknowledged());
-        return response.isAcknowledged();
-    }
-
-    public List<String> retrievalIndexByAliases(String aliases) throws IOException {
-        aliases = formatIndexName(aliases);
-        Response response = client.getLowLevelClient().performRequest(HttpGet.METHOD_NAME, "/_alias/" + aliases);
-        if (HttpStatus.SC_OK == response.getStatusLine().getStatusCode()) {
-            Gson gson = new Gson();
-            InputStreamReader reader = new InputStreamReader(response.getEntity().getContent());
-            JsonObject responseJson = gson.fromJson(reader, JsonObject.class);
-            log.debug("retrieval indexes by aliases {}, response is {}", aliases, responseJson);
-            return new ArrayList<>(responseJson.keySet());
-        }
-        return Collections.emptyList();
+        return es.get().alias().indices(alias).keySet();
     }
 
     /**
-     * If your indexName is retrieved from elasticsearch through {@link #retrievalIndexByAliases(String)} or some other
-     * method and it already contains namespace. Then you should delete the index by this method, this method will no
-     * longer concatenate namespace.
-     * <p>
+     * If your indexName is retrieved from elasticsearch through {@link
+     * #retrievalIndexByAliases(String)} or some other method and it already contains namespace.
+     * Then you should delete the index by this method, this method will no longer concatenate
+     * namespace.
+     *
      * https://github.com/apache/skywalking/pull/3017
      */
-    public boolean deleteByIndexName(String indexName) throws IOException {
-        return deleteIndex(indexName, false);
+    public boolean deleteByIndexName(String indexName) {
+        return es.get().index().delete(indexName);
     }
 
-    /**
-     * If your indexName is obtained from metadata or configuration and without namespace. Then you should delete the
-     * index by this method, this method automatically concatenates namespace.
-     * <p>
-     * https://github.com/apache/skywalking/pull/3017
-     */
-    public boolean deleteByModelName(String modelName) throws IOException {
-        return deleteIndex(modelName, true);
+    public boolean isExistsIndex(String indexName) {
+        indexName = indexNameConverter.apply(indexName);
+
+        return es.get().index().exists(indexName);
     }
 
-    protected boolean deleteIndex(String indexName, boolean formatIndexName) throws IOException {
-        if (formatIndexName) {
-            indexName = formatIndexName(indexName);
-        }
-        DeleteIndexRequest request = new DeleteIndexRequest(indexName);
-        DeleteIndexResponse response;
-        response = client.indices().delete(request);
-        log.debug("delete {} index finished, isAcknowledged: {}", indexName, response.isAcknowledged());
-        return response.isAcknowledged();
+    public Optional<IndexTemplate> getTemplate(String name) {
+        name = indexNameConverter.apply(name);
+
+        return es.get().templates().get(name);
     }
 
-    public boolean isExistsIndex(String indexName) throws IOException {
-        indexName = formatIndexName(indexName);
-        GetIndexRequest request = new GetIndexRequest();
-        request.indices(indexName);
-        return client.indices().exists(request);
+    public boolean isExistsTemplate(String indexName) {
+        indexName = indexNameConverter.apply(indexName);
+
+        return es.get().templates().exists(indexName);
     }
 
-    public boolean isExistsTemplate(String indexName) throws IOException {
-        indexName = formatIndexName(indexName);
+    public boolean createOrUpdateTemplate(String indexName, Map<String, Object> settings,
+                                          Mappings mapping, int order) {
+        indexName = indexNameConverter.apply(indexName);
 
-        Response response = client.getLowLevelClient().performRequest(HttpHead.METHOD_NAME, "/_template/" + indexName);
-
-        int statusCode = response.getStatusLine().getStatusCode();
-        if (statusCode == HttpStatus.SC_OK) {
-            return true;
-        } else if (statusCode == HttpStatus.SC_NOT_FOUND) {
-            return false;
-        } else {
-            throw new IOException(
-                "The response status code of template exists request should be 200 or 404, but it is " + statusCode);
-        }
+        return es.get().templates().createOrUpdate(indexName, settings, mapping, order);
     }
 
-    public boolean createTemplate(String indexName, Map<String, Object> settings,
-                                  Map<String, Object> mapping) throws IOException {
-        indexName = formatIndexName(indexName);
+    public boolean deleteTemplate(String indexName) {
+        indexName = indexNameConverter.apply(indexName);
 
-        String[] patterns = new String[] {indexName + "-*"};
-
-        Map<String, Object> aliases = new HashMap<>();
-        aliases.put(indexName, new JsonObject());
-
-        Map<String, Object> template = new HashMap<>();
-        template.put("index_patterns", patterns);
-        template.put("aliases", aliases);
-        template.put("settings", settings);
-        template.put("mappings", mapping);
-
-        HttpEntity entity = new NStringEntity(new Gson().toJson(template), ContentType.APPLICATION_JSON);
-
-        Response response = client.getLowLevelClient()
-                                  .performRequest(
-                                      HttpPut.METHOD_NAME, "/_template/" + indexName, Collections.emptyMap(), entity);
-        return response.getStatusLine().getStatusCode() == HttpStatus.SC_OK;
+        return es.get().templates().delete(indexName);
     }
 
-    public boolean deleteTemplate(String indexName) throws IOException {
-        indexName = formatIndexName(indexName);
-
-        Response response = client.getLowLevelClient()
-                                  .performRequest(HttpDelete.METHOD_NAME, "/_template/" + indexName);
-        return response.getStatusLine().getStatusCode() == HttpStatus.SC_OK;
+    public SearchResponse search(Supplier<String[]> indices, Search search) {
+        final String[] indexNames =
+            Arrays.stream(indices.get())
+                  .map(indexNameConverter)
+                  .toArray(String[]::new);
+        final SearchParams params = new SearchParams()
+            .allowNoIndices(true)
+            .ignoreUnavailable(true)
+            .expandWildcards("open");
+        return es.get().search(
+            search,
+            params,
+            indexNames);
     }
 
-    public SearchResponse search(String indexName, SearchSourceBuilder searchSourceBuilder) throws IOException {
-        indexName = formatIndexName(indexName);
-        SearchRequest searchRequest = new SearchRequest(indexName);
-        searchRequest.types(TYPE);
-        searchRequest.source(searchSourceBuilder);
-        return client.search(searchRequest);
+    public SearchResponse search(String indexName, Search search) {
+        indexName = indexNameConverter.apply(indexName);
+
+        return es.get().search(search, indexName);
     }
 
-    public GetResponse get(String indexName, String id) throws IOException {
-        indexName = formatIndexName(indexName);
-        GetRequest request = new GetRequest(indexName, TYPE, id);
-        return client.get(request);
+    public SearchResponse search(String indexName, Search search, SearchParams params) {
+        indexName = indexNameConverter.apply(indexName);
+
+        return es.get().search(search, params, indexName);
     }
 
-    public SearchResponse ids(String indexName, String[] ids) throws IOException {
-        indexName = formatIndexName(indexName);
-
-        SearchRequest searchRequest = new SearchRequest(indexName);
-        searchRequest.types(TYPE);
-        searchRequest.source().query(QueryBuilders.idsQuery().addIds(ids)).size(ids.length);
-        return client.search(searchRequest);
+    public SearchResponse scroll(Duration contextRetention, String scrollId) {
+        return es.get().scroll(contextRetention, scrollId);
     }
 
-    public void forceInsert(String indexName, String id, XContentBuilder source) throws IOException {
-        IndexRequest request = (IndexRequest) prepareInsert(indexName, id, source);
-        request.setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE);
-        client.index(request);
-    }
-
-    public void forceUpdate(String indexName, String id, XContentBuilder source, long version) throws IOException {
-        org.elasticsearch.action.update.UpdateRequest request = (org.elasticsearch.action.update.UpdateRequest) prepareUpdate(
-            indexName, id, source);
-        request.version(version);
-        request.setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE);
-        client.update(request);
-    }
-
-    public void forceUpdate(String indexName, String id, XContentBuilder source) throws IOException {
-        org.elasticsearch.action.update.UpdateRequest request = (org.elasticsearch.action.update.UpdateRequest) prepareUpdate(
-            indexName, id, source);
-        request.setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE);
-        client.update(request);
-    }
-
-    public InsertRequest prepareInsert(String indexName, String id, XContentBuilder source) {
-        indexName = formatIndexName(indexName);
-        return new ElasticSearchInsertRequest(indexName, TYPE, id).source(source);
-    }
-
-    public UpdateRequest prepareUpdate(String indexName, String id, XContentBuilder source) {
-        indexName = formatIndexName(indexName);
-        return new ElasticSearchUpdateRequest(indexName, TYPE, id).doc(source);
-    }
-
-    public int delete(String indexName, String timeBucketColumnName, long endTimeBucket) throws IOException {
-        indexName = formatIndexName(indexName);
-        Map<String, String> params = Collections.singletonMap("conflicts", "proceed");
-        String jsonString = "{" + "  \"query\": {" + "    \"range\": {" + "      \"" + timeBucketColumnName + "\": {" + "        \"lte\": " + endTimeBucket + "      }" + "    }" + "  }" + "}";
-        HttpEntity entity = new NStringEntity(jsonString, ContentType.APPLICATION_JSON);
-        Response response = client.getLowLevelClient()
-                                  .performRequest(
-                                      HttpPost.METHOD_NAME, "/" + indexName + "/_delete_by_query", params, entity);
-        log.debug("delete indexName: {}, jsonString : {}", indexName, jsonString);
-        return response.getStatusLine().getStatusCode();
-    }
-
-    public void synchronousBulk(BulkRequest request) {
-        request.timeout(TimeValue.timeValueMinutes(2));
-        request.setRefreshPolicy(WriteRequest.RefreshPolicy.WAIT_UNTIL);
-        request.waitForActiveShards(ActiveShardCount.ONE);
+    public boolean deleteScrollContextQuietly(String scrollId) {
         try {
-            int size = request.requests().size();
-            BulkResponse responses = client.bulk(request);
-            log.info("Synchronous bulk took time: {} millis, size: {}", responses.getTook().getMillis(), size);
-        } catch (IOException e) {
-            log.error(e.getMessage(), e);
+            return es.get().deleteScrollContext(scrollId);
+        } catch (Exception e) {
+            log.warn("Failed to delete scroll context: {}", scrollId, e);
+            return false;
         }
     }
 
-    public BulkProcessor createBulkProcessor(int bulkActions, int flushInterval, int concurrentRequests) {
-        BulkProcessor.Listener listener = createBulkListener();
+    public Optional<Document> get(String indexName, String id) {
+        indexName = indexNameConverter.apply(indexName);
 
-        return BulkProcessor.builder(client::bulkAsync, listener)
-                            .setBulkActions(bulkActions)
-                            .setFlushInterval(TimeValue.timeValueSeconds(flushInterval))
-                            .setConcurrentRequests(concurrentRequests)
-                            .setBackoffPolicy(BackoffPolicy.exponentialBackoff(TimeValue.timeValueMillis(100), 3))
-                            .build();
+        return es.get().documents().get(indexName, TYPE, id);
     }
 
-    protected BulkProcessor.Listener createBulkListener() {
-        return new BulkProcessor.Listener() {
-            @Override
-            public void beforeBulk(long executionId, BulkRequest request) {
-                int numberOfActions = request.numberOfActions();
-                log.debug("Executing bulk [{}] with {} requests", executionId, numberOfActions);
-            }
+    public boolean existDoc(String indexName, String id) {
+        indexName = indexNameConverter.apply(indexName);
 
-            @Override
-            public void afterBulk(long executionId, BulkRequest request, BulkResponse response) {
-                if (response.hasFailures()) {
-                    log.warn("Bulk [{}] executed with failures", executionId);
-                } else {
-                    log.info(
-                        "Bulk execution id [{}] completed in {} milliseconds, size: {}", executionId, response.getTook()
-                                                                                                              .getMillis(),
-                        request
-                            .requests()
-                            .size()
-                    );
-                }
-            }
+        return es.get().documents().exists(indexName, TYPE, id);
+    }
 
-            @Override
-            public void afterBulk(long executionId, BulkRequest request, Throwable failure) {
-                log.error("Failed to execute bulk", failure);
-            }
-        };
+    /**
+     * Provide to get documents from multi indices by IDs.
+     * @param indexIds key: indexName, value: ids list
+     * @return Documents
+     * @since 9.2.0
+     */
+    public Optional<Documents> ids(Map<String, List<String>> indexIds) {
+        Map<String, List<String>> map = new HashMap<>();
+        indexIds.forEach((indexName, ids) -> {
+            map.put(indexNameConverter.apply(indexName), ids);
+        });
+        return es.get().documents().mget(TYPE, map);
+    }
+
+    /**
+     * Search by ids with index alias, when can not locate the physical index.
+     * Otherwise, recommend use method {@link #ids}
+     * @param indexName Index alias name or physical name
+     * @param ids ID list
+     * @return SearchResponse
+     * @since 9.2.0 this method was ids
+     */
+    public SearchResponse searchIDs(String indexName, Iterable<String> ids) {
+        indexName = indexNameConverter.apply(indexName);
+
+        return es.get().search(Search.builder()
+                                     .size(Iterables.size(ids))
+                                     .query(Query.ids(ids))
+                                     .build(), indexName);
+    }
+
+    public void forceInsert(String indexName, String id, Map<String, Object> source) {
+        try (HistogramMetrics.Timer timer = singleWriteHistogram.createTimer()) {
+            IndexRequestWrapper wrapper = prepareInsert(indexName, id, source);
+            Map<String, Object> params = ImmutableMap.of("refresh", "true");
+            es.get().documents().index(wrapper.getRequest(), params);
+        }
+    }
+
+    public void forceUpdate(String indexName, String id, Map<String, Object> source) {
+        try (HistogramMetrics.Timer timer = singleUpdateHistogram.createTimer()) {
+            UpdateRequestWrapper wrapper = prepareUpdate(indexName, id, source);
+            Map<String, Object> params = ImmutableMap.of("refresh", "true");
+            es.get().documents().update(wrapper.getRequest(), params);
+        }
+    }
+
+    public void deleteById(String indexName, String id) {
+        try (HistogramMetrics.Timer timer = singleDeleteHistogram.createTimer()) {
+            indexName = indexNameConverter.apply(indexName);
+            Map<String, Object> params = ImmutableMap.of("refresh", "true");
+            es.get().documents().deleteById(indexName, TYPE, id, params);
+        }
+    }
+
+    public IndexRequestWrapper prepareInsert(String indexName, String id,
+                                             Map<String, Object> source) {
+        return prepareInsert(indexName, id, Optional.empty(), source);
+    }
+
+    public IndexRequestWrapper prepareInsert(String indexName, String id, Optional<String> routingValue,
+                                             Map<String, Object> source) {
+        indexName = indexNameConverter.apply(indexName);
+        return new IndexRequestWrapper(indexName, TYPE, id, routingValue, source);
+    }
+
+    public UpdateRequestWrapper prepareUpdate(String indexName, String id,
+                                              Map<String, Object> source) {
+        indexName = indexNameConverter.apply(indexName);
+        return new UpdateRequestWrapper(indexName, TYPE, id, source);
+    }
+
+    public BulkProcessor createBulkProcessor(int bulkActions,
+                                             int flushInterval,
+                                             int concurrentRequests,
+                                             int batchOfBytes) {
+        return BulkProcessor.builder()
+                            .bulkActions(bulkActions)
+                            .batchOfBytes(batchOfBytes)
+                            .flushInterval(Duration.ofSeconds(flushInterval))
+                            .concurrentRequests(concurrentRequests)
+                            .bulkMetrics(bulkWriteHistogram)
+                            .build(es);
     }
 
     public String formatIndexName(String indexName) {
-        for (final IndexNameConverter indexNameConverter : indexNameConverters) {
-            indexName = indexNameConverter.convert(indexName);
+        return indexNameConverter.apply(indexName);
+    }
+
+    private void initTelemetry() {
+        MetricsCreator metricsCreator = moduleManager.find(TelemetryModule.NAME)
+                                                     .provider()
+                                                     .getService(MetricsCreator.class);
+        if (singleWriteHistogram == null) {
+            singleWriteHistogram = metricsCreator.createHistogramMetric(
+                "elasticsearch_write_latency",
+                "Elasticsearch write/update/delete latency in seconds, bulk_write include write/update",
+                new MetricsTag.Keys("operation"),
+                new MetricsTag.Values("single_write"),
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0
+            );
         }
-        return indexName;
+        if (singleUpdateHistogram == null) {
+            singleUpdateHistogram = metricsCreator.createHistogramMetric(
+                "elasticsearch_write_latency",
+                "Elasticsearch write/update/delete latency in seconds, bulk_write include write/update",
+                new MetricsTag.Keys("operation"),
+                new MetricsTag.Values("single_update"),
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0
+            );
+        }
+        if (singleDeleteHistogram == null) {
+            singleDeleteHistogram = metricsCreator.createHistogramMetric(
+                "elasticsearch_write_latency",
+                "Elasticsearch write/update/delete latency in seconds, bulk_write include write/update",
+                new MetricsTag.Keys("operation"),
+                new MetricsTag.Values("single_delete"),
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0
+            );
+        }
+        if (bulkWriteHistogram == null) {
+            bulkWriteHistogram = metricsCreator.createHistogramMetric(
+                "elasticsearch_write_latency",
+                "Elasticsearch write/update/delete latency in seconds, bulk_write include write/update",
+                new MetricsTag.Keys("operation"),
+                new MetricsTag.Values("bulk_write"),
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0
+            );
+        }
     }
 }

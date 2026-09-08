@@ -1,0 +1,31 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Mock input data for k8s-service.yaml rules.
+
+network-profiling-slow-trace:
+  body-type: json
+  body: '{"latency":1200,"uri":"/api/orders","reason":"STATUS_5XX","service":"k8s-svc","serviceInstance":"k8s-inst-1","client_process":{"process_id":"","local":true,"address":""},"server_process":{"process_id":"proc-server-2","local":false,"address":"10.0.1.2:9090"},"detect_point":"SERVER","component":"http","ssl":true}'
+  tags:
+    LOG_KIND: NET_PROFILING_SAMPLED_TRACE
+  expect:
+    save: true
+    abort: false
+    outputField.latency: 1200
+    outputField.uri: /api/orders
+    outputField.reason: STATUS_5XX
+    outputField.detectPoint: SERVER
+    outputField.destProcessId: proc-server-2
+    outputField.componentId: 129

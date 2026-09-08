@@ -1,0 +1,491 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+package org.apache.skywalking.oap.server.receiver.runtimerule.module;
+
+import com.linecorp.armeria.common.HttpMethod;
+import java.util.Arrays;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.skywalking.oap.log.analyzer.v2.module.LogAnalyzerModule;
+import org.apache.skywalking.oap.server.admin.server.cluster.AdminClusterChannelManager;
+import org.apache.skywalking.oap.server.admin.server.module.AdminServerModule;
+import org.apache.skywalking.oap.server.core.CoreModule;
+import org.apache.skywalking.oap.server.core.alarm.AlarmModule;
+import org.apache.skywalking.oap.server.core.server.GRPCHandlerRegister;
+import org.apache.skywalking.oap.server.core.server.HTTPHandlerRegister;
+import org.apache.skywalking.oap.server.core.storage.StorageModule;
+import org.apache.skywalking.oap.server.core.storage.management.RuntimeRuleManagementDAO;
+import org.apache.skywalking.oap.server.core.storage.model.StorageManipulationOpt;
+import org.apache.skywalking.oap.server.library.module.ModuleDefine;
+import org.apache.skywalking.oap.server.library.module.ModuleProvider;
+import org.apache.skywalking.oap.server.library.module.ModuleStartException;
+import org.apache.skywalking.oap.server.library.module.ServiceNotProvidedException;
+import org.apache.skywalking.oap.server.receiver.runtimerule.cluster.RuntimeRuleClusterClient;
+import org.apache.skywalking.oap.server.receiver.runtimerule.cluster.RuntimeRuleClusterServiceImpl;
+import org.apache.skywalking.oap.server.receiver.runtimerule.reconcile.DSLManager;
+import org.apache.skywalking.oap.server.receiver.runtimerule.status.SchemaApplyCoordinator;
+import org.apache.skywalking.oap.server.receiver.runtimerule.rest.RuntimeRuleRestHandler;
+import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
+import org.apache.skywalking.oap.server.telemetry.api.TelemetryRelatedContext;
+
+/**
+ * Boots the runtime-rule admin surface and the components that converge MAL / LAL rule
+ * changes across an OAP cluster. Disabled by default — the provider is loaded only when
+ * an operator enables it (selector {@code default} or env var
+ * {@code SW_RECEIVER_RUNTIME_RULE=default}) and the {@link AdminServerModule} is also
+ * enabled (the shared admin HTTP host this module mounts onto). Until then no REST route
+ * is registered, no scheduled tick fires, no cluster RPC is registered.
+ *
+ * <h2>What this provider wires</h2>
+ * <ul>
+ *   <li>REST handlers on the {@link AdminServerModule}-owned HTTP host
+ *       ({@code /runtime/rule/addOrUpdate}, {@code /inactivate}, {@code /delete},
+ *       {@code /list}, {@code /dump}, single-rule fetch, bundled catalogue).</li>
+ *   <li>{@link DSLManager} + a single-thread scheduled executor — local-state convergence
+ *       on the periodic tick (default 30 s) plus a synchronous first tick at boot.</li>
+ *   <li>{@link RuntimeRuleClusterServiceImpl} on the cluster gRPC bus — receives Suspend
+ *       / Resume / Forward RPCs from peers.</li>
+ *   <li>{@link RuntimeRuleClusterClient} — outbound counterpart for broadcasts and
+ *       forward-to-main writes.</li>
+ *   <li>{@link RuntimeRuleManagementDAO} resolved through the active storage module —
+ *       per-backend upsert / read / delete on the rule rows.</li>
+ * </ul>
+ *
+ * <h2>Architecture: scheduler · orchestrators · engines</h2>
+ * Three layers, with one boundary between each:
+ * <ul>
+ *   <li><b>Scheduler</b> ({@link DSLManager} + REST handler). DSL-agnostic. Owns lock
+ *       acquisition, cluster Suspend/Resume RPC fan-out, persistence (DAO upsert),
+ *       cross-file ownership enforcement, tick cadence, self-heal, classloader
+ *       graveyard lifecycle, alarm-reset dispatch. Holds
+ *       references to the engines via {@code RuleEngineRegistry} and drives the two
+ *       orchestrators below.</li>
+ *   <li><b>Orchestrators</b>. Two of them, one per pipeline:
+ *     <ul>
+ *       <li>{@link org.apache.skywalking.oap.server.receiver.runtimerule.reconcile.DSLRuntimeApply}
+ *           — apply pipeline for NEW / FILTER_ONLY / STRUCTURAL classifications. Routes to
+ *           the right engine via the registry, drives compile → fireSchemaChanges → verify →
+ *           commit | rollback. Returns an {@code Outcome} the scheduler reads to update
+ *           snapshot + persistence.</li>
+ *       <li>{@link org.apache.skywalking.oap.server.receiver.runtimerule.reconcile.DSLRuntimeUnregister}
+ *           — tear-down pipeline for INACTIVE / {@code /delete} / gone-keys cleanup. Routes
+ *           to {@code engine.unregister}.</li>
+ *     </ul>
+ *     The orchestrators are DSL-agnostic — they only know the SPI surface, not which engine
+ *     is registered behind a given catalog.</li>
+ *   <li><b>Engines</b> ({@code MalRuleEngine}, {@code LalRuleEngine}, future
+ *       {@code OalRuleEngine}). DSL-specific. Each implements
+ *       {@link org.apache.skywalking.oap.server.receiver.runtimerule.engine.RuleEngine}: classify,
+ *       claimedKeys, compile, fireSchemaChanges, verify, commit, rollback, unregister.
+ *       Engines own everything that depends on the DSL — Javassist class generation, applier
+ *       registration, post-DDL probe semantics, classloader retire, alarm-reset target sets.
+ *       Adding a new DSL is one SPI implementation + a {@code RuleEngineRegistry.register}
+ *       call; no scheduler or orchestrator edit needed.</li>
+ * </ul>
+ *
+ * <pre>
+ *   ┌─────────────────────────  scheduler  ──────────────────────────┐
+ *   │ RuntimeRuleRestHandler  →  DSLManager.applyOneRuleFileInternal │
+ *   │                                       │                        │
+ *   │   • catalog routing (engineRegistry.forCatalog)                 │
+ *   │   • main / peer routing (MainRouter)                            │
+ *   │   • per-file lock acquisition                                   │
+ *   │   • Suspend/Resume RPC fan-out                                  │
+ *   │   • cross-file ownership guard (DAO + appliedX)                 │
+ *   │   • storage-opt selection (withSchemaChange / withoutSchemaChange /       │
+ *   │     verifySchemaOnly) — gates whether DDL fires                 │
+ *   │   • persistence (RuntimeRuleManagementDAO.save) + 2-PC stash    │
+ *   │     for STRUCTURAL via StructuralCommitCoordinator              │
+ *   │   • DSLRuntimeUnregister orchestrator routes teardown to engine │
+ *   └────────────┬────────────────────────────────┬──────────────────┘
+ *                │                                │
+ *                ▼                                ▼
+ *   ┌──────  MalRuleEngine  ──────┐    ┌──────  LalRuleEngine  ──────┐
+ *   │  catalogs: otel-rules,      │    │  catalogs: lal              │
+ *   │            log-mal-rules,   │    │                             │
+ *   │            telegraf-rules,  │    │                             │
+ *   │            meter-analyzer-  │    │                             │
+ *   │              config         │    │                             │
+ *   │  classify(old, new, ina)    │    │  classify(old, new, ina)    │
+ *   │  claimedKeys(content, src)  │    │  claimedKeys(content, src)  │
+ *   │  compile → CompiledMalDSL   │    │  compile → CompiledLalDSL   │
+ *   │  fireSchemaChanges (no-op)  │    │  fireSchemaChanges (no-op)  │
+ *   │  verify → null | error str  │    │  verify (no-op, null)       │
+ *   │  commit                     │    │  commit                     │
+ *   │  rollback                   │    │  rollback                   │
+ *   │  unregister                 │    │  unregister                 │
+ *   └─────────────────────────────┘    └─────────────────────────────┘
+ * </pre>
+ *
+ * <h2>Phase pipeline (per-file)</h2>
+ * <pre>
+ *   classify  ─►  NO_CHANGE   →  scheduler skips (unless forced)
+ *             ─►  INACTIVE    →  scheduler routes to engine.unregister
+ *             ─►  NEW / FILTER_ONLY / STRUCTURAL → continue:
+ *
+ *   claimedKeys                    (scheduler runs cross-file guard on this set)
+ *   engine.newApplyContext(inputs) (engine narrows shared inputs into its own context)
+ *   engine.compile                 (compile classes + register handlers; NO commit yet)
+ *   engine.fireSchemaChanges       (drive listener chain; no-op for MAL since fused into
+ *                                   compile, no-op for LAL since no backend schema)
+ *   engine.verify                  (post-DDL probe; MAL: isExists; LAL: no-op)
+ *           │
+ *           ├─ verify failed →  engine.rollback (drop just-registered)
+ *           └─ verify ok      →  engine.commit  (atomic in-memory swap, retire CL,
+ *                                                fire alarm reset)
+ * </pre>
+ *
+ * <h2>Per-file lifecycle on shared mechanism</h2>
+ * <pre>
+ *   POST /runtime/rule/{addOrUpdate|inactivate|delete}
+ *        │
+ *        ├─ scheduler:  validate catalog (registry-driven), find main, forward if peer
+ *        ├─ scheduler:  acquire per-file lock; broadcast Suspend (peers park dispatch)
+ *        ├─ engines:    classify → claimedKeys → compile → fire → verify → commit | rollback
+ *        ├─ scheduler:  persist row (DAO.save) — STRUCTURAL stashes commit until persist OK
+ *        ├─ scheduler:  finalize commit  (success)  → drop removedMetrics, snapshot RUNNING,
+ *        │              broadcastResume; or
+ *        │              discard commit   (failure)  → engine.rollback, broadcastResume
+ *        └─ scheduler:  release lock; return HTTP status (200 / 409 / 421 / 500 / 503)
+ * </pre>
+ *
+ * <p>Peers converge on the next dslManager tick by reading the persisted row and re-running
+ * the same engines under {@link StorageManipulationOpt#withoutSchemaChange} — peers register
+ * local handlers + prototypes but skip backend DDL since main has already done the writes.
+ * {@code /inactivate} is soft-pause (withoutSchemaChange — backend preserved, OAP-internal state
+ * torn down); {@code /delete} is destructive (withSchemaChange so the listener chain fires
+ * {@code dropTable}). Both ride the same {@link
+ * org.apache.skywalking.oap.server.receiver.runtimerule.reconcile.DSLRuntimeUnregister}
+ * orchestrator that dispatches to {@code engine.unregister}.
+ *
+ * <h2>Catalog → engine routing</h2>
+ * Catalog membership is data-driven through {@code RuleEngineRegistry}: a catalog is "MAL"
+ * iff a registered engine is {@code MalRuleEngine}. Adding a MAL catalog is one entry in
+ * {@code MalRuleEngine.supportedCatalogs} — REST validation, scheduler routing, and tick
+ * enumeration pick it up automatically. A catalog additionally needs its owning receiver /
+ * analyzer module to expose a {@code MalConverterRegistry} service before converter push
+ * works; {@code meter-analyzer-config} gets that from {@code agent-analyzer}'s
+ * {@code MeterProcessService}, while {@code telegraf-rules} still lacks one and therefore
+ * degrades to "no push".
+ *
+ * <p>The full architecture (single-main routing, lock acquisition policy, marker-debt
+ * invariant for cold-boot / topology-shift, cross-file ownership semantics, soft-pause /
+ * delete split, self-heal backstop) lives in the design doc:
+ * {@code docs/en/concepts-and-designs/runtime-rule-hot-update.md}.
+ */
+@Slf4j
+public class RuntimeRuleModuleProvider extends ModuleProvider {
+
+    /**
+     * Per-peer Suspend / Resume RPC deadline. 2 s — enough for a healthy cluster round-trip,
+     * short enough that a single unreachable peer doesn't stall the /addOrUpdate latency.
+     */
+    private static final long SUSPEND_RPC_DEADLINE_MS = 2_000L;
+    /**
+     * Forward-to-main RPC deadline. Longer than Suspend / Resume because the forwarded
+     * workflow includes compile + DDL + persist on the main. 30 s covers the typical upper
+     * bound for a BanyanDB-backed apply with a handful of added metrics; larger rule files
+     * may need tuning via the module config in a future change.
+     */
+    private static final long FORWARD_RPC_DEADLINE_MS = 30_000L;
+
+    /**
+     * Initial delay before the scheduled dslManager's first tick. 2 seconds — just past
+     * {@code RemoteClientManager}'s 1 s initial refresh, so the peer list is almost always
+     * populated by the time we run. This closes the cold-boot gap for runtime-only DB rows
+     * when {@link #notifyAfterCompleted} decided to defer the synchronous first tick
+     * (peer list not yet populated at that moment); without this, a restart could leave
+     * persisted MAL/LAL overrides absent for a full {@code refreshRulesPeriod} window
+     * (default 30 s) while ingest runs against static-shape workers.
+     *
+     * <p>Deliberately NOT read from {@code refreshRulesPeriod}: that value controls
+     * steady-state convergence cadence, not the one-shot catch-up that must happen as soon
+     * as the peer list is ready. Tick is idempotent, so running at 2 s and again at 2 s +
+     * {@code refreshRulesPeriod} is cheap — the hash-match short-circuit skips
+     * unchanged bundles.
+     */
+    private static final long SCHEDULER_INITIAL_DELAY_SECONDS = 2L;
+    /** Retain a tracked apply-status this long after its last update so a post-apply UI poll (and
+     *  a post-refresh content query) still resolves, then reap it to bound memory. */
+    private static final long APPLY_STATUS_TTL_MS = 3_600_000L;
+    /** How often the apply-status eviction sweep runs on the reconciler executor. */
+    private static final long APPLY_STATUS_EVICT_INTERVAL_SECONDS = 300L;
+
+    /**
+     * Env var carrying this OAP's unique per-node identity — the Kubernetes pod UID, injected
+     * by the skywalking-helm chart / swck operator from {@code metadata.uid}. Used as the
+     * runtime-rule cluster {@code selfNodeId} when present, because the telemetry-id fallback
+     * (gRPC {@code host_port}) collides across replicas under k8s where the bind host is
+     * {@code 0.0.0.0} (every pod reports {@code 0.0.0.0_11800}).
+     */
+    private static final String COLLECTOR_UID_ENV = "SKYWALKING_COLLECTOR_UID";
+
+    private RuntimeRuleModuleConfig moduleConfig;
+    private ScheduledExecutorService reconcilerExecutor;
+    private DSLManager dslManager;
+
+    @Override
+    public String name() {
+        return "default";
+    }
+
+    @Override
+    public Class<? extends ModuleDefine> module() {
+        return RuntimeRuleModule.class;
+    }
+
+    @Override
+    public ConfigCreator newConfigCreator() {
+        return new ConfigCreator<RuntimeRuleModuleConfig>() {
+            @Override
+            public Class type() {
+                return RuntimeRuleModuleConfig.class;
+            }
+
+            @Override
+            public void onInitialized(final RuntimeRuleModuleConfig initialized) {
+                moduleConfig = initialized;
+            }
+        };
+    }
+
+    @Override
+    public void prepare() throws ServiceNotProvidedException {
+        // Nothing to prepare — the admin HTTP host is owned by AdminServerModule and
+        // initialised in its prepare() phase. We bind handlers to it from start().
+    }
+
+    @Override
+    public void start() throws ServiceNotProvidedException, ModuleStartException {
+        // DSLManager is constructed first so both the HTTP handler and the cluster Suspend
+        // service can reference it. The scheduled executor is started in notifyAfterCompleted
+        // after all other modules have finished their boot. The DSLManager builds its own
+        // RuleEngineRegistry from the per-DSL state maps it owns.
+        dslManager = new DSLManager(
+            getManager(),
+            moduleConfig.getSelfHealThresholdSeconds() * 1000L,
+            moduleConfig.getDeferredFenceTimeoutSeconds() * 1000L
+        );
+
+        // Cluster-facing Suspend client: fans out to every non-self peer on the OAP cluster bus
+        // during an addOrUpdate / delete / inactivate so peers stop serving the old bundle
+        // before the main node commits the row change. Uses the admin-internal
+        // ManagedChannel from AdminClusterChannelManager — NOT the public agent /
+        // cluster gRPC bus (default 11800). Privileged admin RPCs stay on the
+        // admin-only port (default 17129) so a compromised node on the agent
+        // network cannot reach Suspend/Resume/Forward.
+        // Resolve this node's stable, unique cluster identity HERE in start() — before
+        // notifyAfterCompleted() applies any rule — so the node knows who it is before it
+        // forwards a write to the main or broadcasts Suspend/Resume. Must be unique per
+        // replica: it is the Forward/Suspend/Resume sender id and the key the receiver's
+        // self-loop guard compares against. See resolveSelfNodeId().
+        final String selfNodeId = resolveSelfNodeId();
+        final AdminClusterChannelManager adminPeerChannels =
+            getManager().find(AdminServerModule.NAME).provider()
+                        .getService(AdminClusterChannelManager.class);
+        final RuntimeRuleClusterClient clusterClient = new RuntimeRuleClusterClient(
+            adminPeerChannels, selfNodeId, SUSPEND_RPC_DEADLINE_MS);
+
+        // Routes mount on the admin-server HTTP host (port 17128 by default), shared
+        // with other admin features. The host is owned by AdminServerModule — runtime-rule
+        // declares it in requiredModules() above, so module bootstrap fails fast if the
+        // admin host is missing instead of opening a separate port that masks the misconfig.
+        final RuntimeRuleRestHandler restHandler = new RuntimeRuleRestHandler(
+            getManager(), dslManager, clusterClient, FORWARD_RPC_DEADLINE_MS);
+        final HTTPHandlerRegister adminRegister = getManager().find(AdminServerModule.NAME)
+                                                              .provider()
+                                                              .getService(HTTPHandlerRegister.class);
+        adminRegister.addHandler(
+            restHandler,
+            Arrays.asList(HttpMethod.POST, HttpMethod.GET)
+        );
+
+        // Register Suspend / Resume / Forward RPCs on the ADMIN-INTERNAL gRPC
+        // server (default port 17129), NOT the public agent / cluster bus
+        // (default 11800). Every OAP node in the cluster exposes these endpoints
+        // so: (a) the main can fan out Suspend/Resume to peers during a STRUCTURAL
+        // apply, and (b) a non-main OAP that receives an HTTP write can
+        // transparently forward the work to the main via Forward. The service
+        // needs a late-bound REST-handler reference for the Forward dispatch
+        // target — wired right after construction so the first incoming Forward
+        // RPC has a workflow to call.
+        final GRPCHandlerRegister clusterGrpc =
+            getManager().find(AdminServerModule.NAME).provider()
+                        .getService(GRPCHandlerRegister.class);
+        final RuntimeRuleClusterServiceImpl clusterService =
+            new RuntimeRuleClusterServiceImpl(dslManager, selfNodeId);
+        clusterService.setRuntimeRuleService(restHandler.getService());
+        clusterGrpc.addHandler(clusterService);
+        log.info(
+            "Runtime rule Suspend / Resume / Forward RPCs registered on cluster gRPC server "
+                + "(selfNodeId={}).", selfNodeId
+        );
+    }
+
+    @Override
+    public void notifyAfterCompleted() throws ModuleStartException {
+        // Seed synthetic applied-state entries from the static rules the catalog loaders
+        // already registered (MeterProcessService, OpenTelemetryMetricRequestProcessor,
+        // LogFilterListener.Factory). With the seed in place, the dslManager's first tick
+        // knows those bundles are live — rehydrate won't double-apply — and a later
+        // /inactivate can cleanly tear down the boot-registered handlers via unregisterBundle
+        // (which now consults StaticRuleRegistry when appliedMal / appliedLal has no entry).
+        try {
+            dslManager.getStaticRuleLoader().loadAll();
+        } catch (final Throwable t) {
+            log.warn("Runtime rule dslManager: static-bundle seeding failed — static rules "
+                + "will still serve, but the first /inactivate against a shipped rule may "
+                + "need a restart to fully converge.", t);
+        }
+
+        // Run one tick before receivers open to close the boot gap for runtime-only rows
+        // (no static file substitute). Unconditional — no peer-list-readiness gate. The
+        // earlier gate consulted {@code RemoteClientManager.getRemoteClient().isEmpty()},
+        // but that signal is "list is non-empty right now", not "membership has stabilised".
+        // In a k8s rollout the list flips to non-empty as soon as self joins it, then keeps
+        // changing for tens of seconds as more pods boot. Gating on it neither guaranteed
+        // membership stability nor saved a wasteful first apply. If this tick runs under
+        // {@code withoutSchemaChange} because peer list is empty, the next scheduled tick (2 s
+        // later) re-evaluates with whatever {@code RemoteClientManager} now shows and re-
+        // applies under {@code withSchemaChange} if this node resolves as main. Backend DDL is
+        // idempotent so the re-apply costs nothing.
+        try {
+            // atBoot=true so a cluster peer picks verifySchemaOnly and refuses to
+            // start against a missing or shape-mismatched backend (k8s pod backloop)
+            // instead of silently registering local workers against schema that
+            // doesn't exist; the main picks withSchemaChange and re-creates missing
+            // runtime schema. The choice is by cluster main-ness, not running mode
+            // (see DSLManager.tickStorageOpt); init mode is the lone exception.
+            dslManager.tick(true);
+            log.info("Runtime rule dslManager: synchronous first tick completed "
+                + "(runtime-only DB rows are now applied locally).");
+        } catch (final RuntimeException re) {
+            // The boot pass re-throws as a RuntimeException so module bootstrap aborts —
+            // a peer's verifySchemaOnly hitting a missing/mismatched backend, or a main's
+            // withSchemaChange failing to create it. Translate to ModuleStartException so
+            // the OAP exit message points the operator at the right place.
+            throw new ModuleStartException(
+                "Runtime rule dslManager boot pass failed: backend schema is missing, "
+                    + "diverges from the declared rule, or could not be created. On a peer, "
+                    + "bring up the cluster main (or init OAP) first; on the main, align the "
+                    + "rule files with the backend, then restart this node.",
+                re);
+        } catch (final Throwable t) {
+            log.warn("Runtime rule dslManager: synchronous first tick failed — "
+                + "runtime-only DB rows will be picked up on the scheduled tick.", t);
+        }
+
+        // DSLManager runs on its own single-thread executor so the tick body cannot starve any
+        // other OAP scheduler. Tick interval is configurable; default 30s. The DSLManager
+        // instance itself was constructed in start() so the cluster Suspend service could
+        // reference it — we just schedule its tick here.
+        reconcilerExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            final Thread t = new Thread(r, "runtime-rule-dslManager");
+            t.setDaemon(true);
+            return t;
+        });
+        final long intervalSeconds = moduleConfig.getRefreshRulesPeriod();
+        // Initial delay is fixed at SCHEDULER_INITIAL_DELAY_SECONDS (2 s), not intervalSeconds.
+        // The synchronous tick in notifyAfterCompleted may have skipped because the peer list
+        // wasn't ready; running the first scheduled tick only after intervalSeconds (30 s by
+        // default) would leave persisted runtime-only rules dark for that whole window. By
+        // firing the first scheduled tick ~2 s in, RemoteClientManager's 1 s initial refresh
+        // has almost certainly populated the peer list, and tickStorageOpt can make a stable
+        // main/peer decision. Tick is idempotent, so firing at 2 s and then at 2 s +
+        // intervalSeconds is cheap — unchanged bundles short-circuit on hash.
+        reconcilerExecutor.scheduleWithFixedDelay(
+            dslManager::tick,
+            SCHEDULER_INITIAL_DELAY_SECONDS, intervalSeconds, TimeUnit.SECONDS
+        );
+        log.info("Runtime rule dslManager scheduled: first tick in {} s, then every {} s.",
+            SCHEDULER_INITIAL_DELAY_SECONDS, intervalSeconds);
+
+        // Bound the apply-status coordinator's memory: reap tracked applies past the retention
+        // window (terminal ones linger long enough for a post-apply UI poll; a stale PENDING from
+        // a missed branch is reaped too — a later query then returns UNKNOWN and the caller falls
+        // back to the durable content hash). Reuses the same single-thread executor; the sweep is
+        // O(tracked) and cheap.
+        reconcilerExecutor.scheduleWithFixedDelay(
+            () -> SchemaApplyCoordinator.INSTANCE.evictExpired(APPLY_STATUS_TTL_MS),
+            APPLY_STATUS_EVICT_INTERVAL_SECONDS, APPLY_STATUS_EVICT_INTERVAL_SECONDS, TimeUnit.SECONDS
+        );
+    }
+
+    /**
+     * Resolve this node's unique, stable runtime-rule cluster identity. Prefers the Kubernetes
+     * pod UID ({@value #COLLECTOR_UID_ENV}, injected by the helm chart / swck operator from
+     * {@code metadata.uid}) because it is unique per replica; falls back to the telemetry id
+     * ({@code host_port}) for non-k8s deployments where each node already has a distinct host.
+     *
+     * <p>Why not the telemetry id directly: under Kubernetes the agent gRPC bind host is
+     * {@code 0.0.0.0}, so every replica's telemetry id is {@code 0.0.0.0_11800} — identical.
+     * That collision makes the receiver's self-loop guard (sender id == own id) reject a
+     * legitimate peer-to-peer Forward as if it had looped back, breaking cross-node writes on
+     * any multi-replica k8s cluster. {@code MainRouter} already routes correctly off the
+     * cluster peer addresses (pod IPs); only the self-identity used for loop suppression needs
+     * to be unique, which the pod UID guarantees.
+     */
+    private String resolveSelfNodeId() {
+        final String collectorUid = System.getenv(COLLECTOR_UID_ENV);
+        if (collectorUid != null && !collectorUid.trim().isEmpty()) {
+            log.info("Runtime rule: selfNodeId from {} (pod UID) = {}", COLLECTOR_UID_ENV, collectorUid);
+            return collectorUid;
+        }
+        final String telemetryId = TelemetryRelatedContext.INSTANCE.getId();
+        log.info("Runtime rule: {} not set; selfNodeId falls back to telemetry id = {} "
+            + "(ensure it is unique per node in a multi-node cluster).", COLLECTOR_UID_ENV, telemetryId);
+        return telemetryId;
+    }
+
+    @Override
+    public String[] requiredModules() {
+        return new String[] {
+            // AdminServerModule — owns the shared admin HTTP host this module mounts onto.
+            // Declared so OAP fails fast at boot when SW_ADMIN_SERVER is not enabled, rather
+            // than leaving the runtime-rule provider loaded but its REST routes unreachable.
+            AdminServerModule.NAME,
+            // CoreModule — required for RemoteClientManager (cluster peer list for routing +
+            // broadcast), MeterSystem + IModelManager (apply pipeline), and GRPCHandlerRegister
+            // (exposing Suspend / Resume / Forward RPCs on the cluster bus).
+            CoreModule.NAME,
+            // StorageModule — RuntimeRuleManagementDAO + ManagementStreamProcessor target live
+            // here; without it, /list, /delete, and dslManager reads have no backend.
+            StorageModule.NAME,
+            // LogAnalyzerModule — exposes the LogFilterListener.Factory service the dslManager's
+            // LAL apply path drives. Always declared so module boot fails fast rather than
+            // masking a broken deployment behind the runtime-rule's "LAL Factory unavailable"
+            // surface.
+            LogAnalyzerModule.NAME,
+            // AlarmModule — the dslManager fires AlarmKernelService.reset after STRUCTURAL and
+            // unregister paths. Declared so module boot fails fast when deployments accidentally
+            // drop the alarm module. The DSLManager still wraps the lookup in try/catch for
+            // defensive handling of transient provider outages, not as an "optional module"
+            // signal.
+            AlarmModule.NAME,
+            // TelemetryModule — exposes MetricsCreator for the lock-observability histograms +
+            // counters (runtime_rule_lock_*). Declared so the module refuses to start on a
+            // deployment where internal metrics wouldn't surface; LockMetrics itself still
+            // null-guards the resolve call so test topologies without telemetry can instantiate
+            // the handler without recording metrics.
+            TelemetryModule.NAME,
+        };
+    }
+}

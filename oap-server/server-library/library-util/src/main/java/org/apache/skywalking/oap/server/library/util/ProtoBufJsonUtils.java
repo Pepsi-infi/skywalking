@@ -18,14 +18,25 @@
 
 package org.apache.skywalking.oap.server.library.util;
 
+import com.google.protobuf.BytesValue;
 import com.google.protobuf.Message;
+import com.google.protobuf.Struct;
 import com.google.protobuf.util.JsonFormat;
 import java.io.IOException;
 
 public class ProtoBufJsonUtils {
 
     public static String toJSON(Message sourceMessage) throws IOException {
-        return JsonFormat.printer().print(sourceMessage);
+        return JsonFormat.printer()
+                         .usingTypeRegistry(
+                             JsonFormat
+                                 .TypeRegistry
+                                 .newBuilder()
+                                 .add(BytesValue.getDescriptor())
+                                 .add(Struct.getDescriptor())
+                                 .build()
+                         )
+                         .print(sourceMessage);
     }
 
     /**

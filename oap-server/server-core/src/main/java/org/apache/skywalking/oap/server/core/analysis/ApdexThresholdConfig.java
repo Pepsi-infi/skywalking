@@ -18,6 +18,7 @@
 
 package org.apache.skywalking.oap.server.core.analysis;
 
+import com.google.common.base.Strings;
 import java.io.FileNotFoundException;
 import java.io.Reader;
 import java.io.StringReader;
@@ -25,11 +26,12 @@ import java.util.Collections;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.skywalking.oap.server.configuration.api.ConfigChangeWatcher;
-import org.apache.skywalking.oap.server.core.Const;
 import org.apache.skywalking.oap.server.core.CoreModule;
 import org.apache.skywalking.oap.server.core.CoreModuleProvider;
 import org.apache.skywalking.oap.server.library.util.ResourceUtils;
+import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
 
 /**
  * Apdex threshold configuration dictionary adapter. Looking up a service apdex threshold from dynamic config service.
@@ -43,7 +45,7 @@ public class ApdexThresholdConfig extends ConfigChangeWatcher implements Configu
 
     private Map<String, Integer> dictionary = Collections.emptyMap();
 
-    private String rawConfig = Const.EMPTY_STRING;
+    private String rawConfig = null;
 
     public ApdexThresholdConfig(final CoreModuleProvider provider) {
         super(CoreModule.NAME, provider, "apdexThreshold");
@@ -73,7 +75,7 @@ public class ApdexThresholdConfig extends ConfigChangeWatcher implements Configu
     @Override
     public void notify(ConfigChangeEvent value) {
         if (EventType.DELETE.equals(value.getEventType())) {
-            activeSetting("");
+            activeSetting(null);
         } else {
             activeSetting(value.getNewValue());
         }
@@ -89,12 +91,12 @@ public class ApdexThresholdConfig extends ConfigChangeWatcher implements Configu
             log.debug("Updating using new static config: {}", config);
         }
         rawConfig = config;
-        updateConfig(new StringReader(config));
+        updateConfig(new StringReader(Strings.nullToEmpty(config)));
     }
 
     @SuppressWarnings("unchecked")
     private void updateConfig(final Reader contentRender) {
-        dictionary = (Map<String, Integer>) new Yaml().load(contentRender);
+        dictionary = new Yaml(new SafeConstructor(new LoaderOptions())).load(contentRender);
         if (dictionary == null) {
             dictionary = Collections.emptyMap();
         }

@@ -19,21 +19,26 @@
 package org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base;
 
 import com.google.gson.JsonObject;
-import org.apache.skywalking.oap.server.core.analysis.NodeType;
-import org.apache.skywalking.oap.server.core.storage.model.DataTypeMapping;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.util.List;
+import org.apache.skywalking.oap.server.core.analysis.Layer;
+import org.apache.skywalking.oap.server.core.storage.model.ElasticSearchExtension;
+import org.apache.skywalking.oap.server.core.profiling.trace.ProfileLanguageType;
 import org.apache.skywalking.oap.server.core.storage.type.StorageDataComplexObject;
 
-public class ColumnTypeEsMapping implements DataTypeMapping {
+public class ColumnTypeEsMapping {
 
-    @Override
-    public String transform(Class<?> type) {
-        if (Integer.class.equals(type) || int.class.equals(type) || NodeType.class.equals(type)) {
+    public String transform(Class<?> type, Type genericType, int length, boolean storageOnly, final ElasticSearchExtension elasticSearchExtension) {
+        if (Integer.class.equals(type) || int.class.equals(type) || Layer.class.equals(type) || ProfileLanguageType.class.equals(type)) {
             return "integer";
         } else if (Long.class.equals(type) || long.class.equals(type)) {
             return "long";
         } else if (Double.class.equals(type) || double.class.equals(type)) {
             return "double";
-        } else if (String.class.equals(type)) {
+        } else if (String.class.equals(type) && storageOnly && length > 32766) {   // 32766 is the max length of a keywords field in ES
+            return "text";
+        } else if (String.class.equals(type) || elasticSearchExtension.isKeyword()) {
             return "keyword";
         } else if (StorageDataComplexObject.class.isAssignableFrom(type)) {
             return "text";
@@ -41,6 +46,9 @@ public class ColumnTypeEsMapping implements DataTypeMapping {
             return "binary";
         } else if (JsonObject.class.equals(type)) {
             return "text";
+        } else if (List.class.isAssignableFrom(type)) {
+            final Type elementType = ((ParameterizedType) genericType).getActualTypeArguments()[0];
+            return transform((Class<?>) elementType, elementType, length, storageOnly, elasticSearchExtension);
         } else {
             throw new IllegalArgumentException("Unsupported data type: " + type.getName());
         }

@@ -21,9 +21,12 @@ package org.apache.skywalking.oap.server.tool.profile.exporter.test;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import javax.annotation.Nullable;
 import org.apache.skywalking.apm.network.language.agent.v3.SegmentObject;
 import org.apache.skywalking.apm.network.language.agent.v3.SpanObject;
+import org.apache.skywalking.oap.server.core.analysis.manual.searchtag.Tag;
 import org.apache.skywalking.oap.server.core.analysis.manual.segment.SegmentRecord;
+import org.apache.skywalking.oap.server.core.query.input.Duration;
 import org.apache.skywalking.oap.server.core.query.type.QueryOrder;
 import org.apache.skywalking.oap.server.core.query.type.Span;
 import org.apache.skywalking.oap.server.core.query.type.TraceBrief;
@@ -38,11 +41,9 @@ public class ProfileTraceDAO implements ITraceQueryDAO {
     }
 
     @Override
-    public TraceBrief queryBasicTraces(long startSecondTB,
-                                       long endSecondTB,
+    public TraceBrief queryBasicTraces(Duration duration,
                                        long minDuration,
                                        long maxDuration,
-                                       String endpointName,
                                        String serviceId,
                                        String serviceInstanceId,
                                        String endpointId,
@@ -50,12 +51,13 @@ public class ProfileTraceDAO implements ITraceQueryDAO {
                                        int limit,
                                        int from,
                                        TraceState traceState,
-                                       QueryOrder queryOrder) throws IOException {
+                                       QueryOrder queryOrder,
+                                       final List<Tag> tags) throws IOException {
         return null;
     }
 
     @Override
-    public List<SegmentRecord> queryByTraceId(String traceId) throws IOException {
+    public List<SegmentRecord> queryByTraceId(String traceId, @Nullable Duration duration) throws IOException {
         final ArrayList<SegmentRecord> segments = new ArrayList<>();
         final SegmentRecord segment = new SegmentRecord();
         segments.add(segment);
@@ -76,6 +78,35 @@ public class ProfileTraceDAO implements ITraceQueryDAO {
         segment.setServiceId("service");
         segment.setSegmentId(exportData.getSegmentId());
         return segments;
+    }
+
+    @Override
+    public List<SegmentRecord> queryBySegmentIdList(List<String> segmentIdList, @Nullable Duration duration) throws IOException {
+        final ArrayList<SegmentRecord> segments = new ArrayList<>();
+        final SegmentRecord segment = new SegmentRecord();
+        segments.add(segment);
+
+        final SegmentObject.Builder segmentBuilder = SegmentObject.newBuilder();
+        segmentBuilder.setTraceSegmentId(exportData.getSegmentId());
+        for (ExportedData.Span span : exportData.getSpans()) {
+            segmentBuilder.addSpans(SpanObject.newBuilder()
+                .setOperationName(span.getOperation())
+                .setStartTime(span.getStart())
+                .setEndTime(span.getEnd())
+                .setSpanId(span.getId())
+                .setParentSpanId(span.getParentId()));
+        }
+        segment.setDataBinary(segmentBuilder.build().toByteArray());
+        segment.setTraceId(exportData.getTraceId());
+        segment.setServiceId("service");
+        segment.setSegmentId(exportData.getSegmentId());
+        segment.setLatency(exportData.getLimit() * 10);
+        return segments;
+    }
+
+    @Override
+    public List<SegmentRecord> queryByTraceIdWithInstanceId(List<String> traceIdList, List<String> instanceIdList, @Nullable Duration duration) throws IOException {
+        return null;
     }
 
     @Override

@@ -18,25 +18,32 @@
 
 package org.apache.skywalking.oap.server.core.analysis.metrics;
 
+import com.google.gson.JsonObject;
+import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.Arg;
+import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.Entrance;
+import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.MetricsFunction;
+import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.SourceFrom;
+import org.apache.skywalking.oap.server.core.storage.annotation.BanyanDB;
+import org.apache.skywalking.oap.server.core.storage.annotation.Column;
+import org.apache.skywalking.oap.server.core.storage.annotation.ElasticSearch;
 import java.util.Comparator;
 import java.util.List;
 import java.util.stream.IntStream;
 import lombok.Getter;
 import lombok.Setter;
-import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.Arg;
-import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.Entrance;
-import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.MetricsFunction;
-import org.apache.skywalking.oap.server.core.analysis.metrics.annotation.SourceFrom;
-import org.apache.skywalking.oap.server.core.storage.annotation.Column;
 
 /**
- * Percentile is a better implementation than {@link PxxMetrics}. It is introduced since 7.0.0, it could calculate the
- * multiple P50/75/90/95/99 values once for all.
+ * Percentile is a better implementation than deprecated PxxMetrics in older releases.
+ * This could calculate the multiple P50/75/90/95/99 values once for all.
+ *
+ * @since 7.0.0
+ * Deprecated since 10.0.0, use {@link PercentileMetrics2} instead.
  */
+@Deprecated
 @MetricsFunction(functionName = "percentile")
 public abstract class PercentileMetrics extends Metrics implements MultiIntValuesHolder {
     protected static final String DATASET = "dataset";
-    protected static final String VALUE = "value";
+    protected static final String VALUE = "datatable_value";
     protected static final String PRECISION = "precision";
 
     private static final int[] RANKS = {
@@ -49,15 +56,19 @@ public abstract class PercentileMetrics extends Metrics implements MultiIntValue
 
     @Getter
     @Setter
-    @Column(columnName = VALUE, dataType = Column.ValueDataType.LABELED_VALUE, storageOnly = true)
+    @Column(name = VALUE, dataType = Column.ValueDataType.LABELED_VALUE, storageOnly = true, multiIntValues = true)
+    @ElasticSearch.Column(legacyName = "value")
+    @BanyanDB.MeasureField
     private DataTable percentileValues;
     @Getter
     @Setter
-    @Column(columnName = PRECISION, storageOnly = true)
+    @Column(name = PRECISION, storageOnly = true)
+    @BanyanDB.MeasureField
     private int precision;
     @Getter
     @Setter
-    @Column(columnName = DATASET, storageOnly = true)
+    @Column(name = DATASET, storageOnly = true)
+    @BanyanDB.MeasureField
     private DataTable dataset;
 
     private boolean isCalculated;
@@ -77,11 +88,12 @@ public abstract class PercentileMetrics extends Metrics implements MultiIntValue
     }
 
     @Override
-    public void combine(Metrics metrics) {
+    public boolean combine(Metrics metrics) {
         this.isCalculated = false;
 
         PercentileMetrics percentileMetrics = (PercentileMetrics) metrics;
         this.dataset.append(percentileMetrics.dataset);
+        return true;
     }
 
     @Override
@@ -94,7 +106,7 @@ public abstract class PercentileMetrics extends Metrics implements MultiIntValue
                 roofs[i] = Math.round(total * RANKS[i] * 1.0f / 100);
             }
 
-            int count = 0;
+            long count = 0;
             final List<String> sortedKeys = dataset.sortedKeys(Comparator.comparingInt(Integer::parseInt));
 
             int loopIndex = 0;
@@ -116,10 +128,17 @@ public abstract class PercentileMetrics extends Metrics implements MultiIntValue
         }
     }
 
+    @Override
     public int[] getValues() {
         return percentileValues.sortedValues(Comparator.comparingInt(Integer::parseInt))
                                .stream()
                                .flatMapToInt(l -> IntStream.of(l.intValue()))
                                .toArray();
+    }
+
+    @Override
+    protected void appendDebugFields(final JsonObject obj) {
+        obj.addProperty("precision", precision);
+        // percentileValues and dataset skipped: DataTable composite type
     }
 }

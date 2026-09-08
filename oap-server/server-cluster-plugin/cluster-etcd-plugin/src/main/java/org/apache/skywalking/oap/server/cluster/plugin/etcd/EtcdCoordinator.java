@@ -20,122 +20,220 @@ package org.apache.skywalking.oap.server.cluster.plugin.etcd;
 
 import com.google.common.base.Strings;
 import com.google.gson.Gson;
+import io.etcd.jetcd.ByteSequence;
+import io.etcd.jetcd.Client;
+import io.etcd.jetcd.ClientBuilder;
+import io.etcd.jetcd.KV;
+import io.etcd.jetcd.Lease;
+import io.etcd.jetcd.Watch;
+import io.etcd.jetcd.kv.GetResponse;
+import io.etcd.jetcd.lease.LeaseKeepAliveResponse;
+import io.etcd.jetcd.options.GetOption;
+import io.etcd.jetcd.options.PutOption;
+import io.etcd.jetcd.options.WatchOption;
+import io.etcd.jetcd.watch.WatchResponse;
+import io.grpc.stub.StreamObserver;
+import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import mousio.etcd4j.EtcdClient;
-import mousio.etcd4j.promises.EtcdResponsePromise;
-import mousio.etcd4j.responses.EtcdKeysResponse;
-import org.apache.skywalking.oap.server.core.cluster.ClusterNodesQuery;
-import org.apache.skywalking.oap.server.core.cluster.ClusterRegister;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.skywalking.oap.server.core.cluster.ClusterCoordinator;
+import org.apache.skywalking.oap.server.library.util.StringUtil;
+import org.apache.skywalking.oap.server.core.cluster.ClusterHealthStatus;
+import org.apache.skywalking.oap.server.core.cluster.OAPNodeChecker;
 import org.apache.skywalking.oap.server.core.cluster.RemoteInstance;
 import org.apache.skywalking.oap.server.core.cluster.ServiceRegisterException;
 import org.apache.skywalking.oap.server.core.remote.client.Address;
-import org.apache.skywalking.oap.server.telemetry.api.TelemetryRelatedContext;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.skywalking.oap.server.library.module.ModuleDefineHolder;
+import org.apache.skywalking.oap.server.library.module.ModuleStartException;
+import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
+import org.apache.skywalking.oap.server.telemetry.api.HealthCheckMetrics;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsCreator;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsTag;
 
-public class EtcdCoordinator implements ClusterRegister, ClusterNodesQuery {
-    private static final Logger logger = LoggerFactory.getLogger(EtcdCoordinator.class);
-
-    private ClusterModuleEtcdConfig config;
-
-    private EtcdClient client;
-
+@Slf4j
+public class EtcdCoordinator extends ClusterCoordinator {
+    private static final Gson GSON = new Gson().newBuilder().create();
+    private final ModuleDefineHolder manager;
+    private final ClusterModuleEtcdConfig config;
     private volatile Address selfAddress;
+    private HealthCheckMetrics healthChecker;
 
+    private final Client client;
     private final String serviceName;
+    private final ByteSequence serviceNameBS;
 
-    private ScheduledExecutorService service = Executors.newSingleThreadScheduledExecutor();
-
-    private static final Integer KEY_TTL = 45;
-
-    public EtcdCoordinator(ClusterModuleEtcdConfig config, EtcdClient client) {
+    public EtcdCoordinator(final ModuleDefineHolder manager,
+                           final ClusterModuleEtcdConfig config) throws ModuleStartException {
+        if (Strings.isNullOrEmpty(config.getServiceName())) {
+            throw new ModuleStartException("ServiceName cannot be empty.");
+        }
+        this.manager = manager;
         this.config = config;
-        this.client = client;
-        this.serviceName = config.getServiceName();
+        if (!config.getServiceName().endsWith("/")) {
+            serviceName = config.getServiceName() + "/";
+        } else {
+            serviceName = config.getServiceName();
+        }
+        this.serviceNameBS = ByteSequence.from(serviceName, Charset.defaultCharset());
+        ClientBuilder builder = Client.builder()
+                                      .target(config.getEndpoints())
+                                      .authority(config.getAuthority());
+        if (StringUtil.isNotEmpty(config.getNamespace())) {
+            builder.namespace(ByteSequence.from(config.getNamespace(), Charset.defaultCharset()));
+        }
+        if (config.isAuthentication()) {
+            builder.user(ByteSequence.from(config.getUser(), Charset.defaultCharset()))
+                   .password(ByteSequence.from(config.getPassword(), Charset.defaultCharset()));
+        }
+        this.client = builder.build();
     }
 
     @Override
     public List<RemoteInstance> queryRemoteNodes() {
-
-        List<RemoteInstance> res = new ArrayList<>();
+        List<RemoteInstance> remoteInstances = new ArrayList<>();
         try {
-            EtcdKeysResponse response = client.get(serviceName + "/").send().get();
-            List<EtcdKeysResponse.EtcdNode> nodes = response.getNode().getNodes();
+            final KV kvClient = client.getKVClient();
+            final GetResponse response = kvClient.get(
+                serviceNameBS,
+                GetOption.newBuilder().withPrefix(serviceNameBS).build()
+            ).get();
 
-            Gson gson = new Gson();
-            if (nodes != null) {
-                nodes.forEach(node -> {
-                    EtcdEndpoint endpoint = gson.fromJson(node.getValue(), EtcdEndpoint.class);
-                    Address address = new Address(endpoint.getHost(), endpoint.getPort(), true);
-                    if (!address.equals(selfAddress)) {
-                        address.setSelf(false);
-                    }
-                    res.add(new RemoteInstance(address));
-                });
+            response.getKvs().forEach(kv -> {
+                EtcdEndpoint endpoint = GSON.fromJson(
+                    kv.getValue().toString(Charset.defaultCharset()),
+                    EtcdEndpoint.class
+                );
+                Address address = new Address(endpoint.getHost(), endpoint.getPort(), false);
+                if (address.equals(selfAddress)) {
+                    address.setSelf(true);
+                }
+                remoteInstances.add(new RemoteInstance(address));
+            });
+
+            ClusterHealthStatus healthStatus = OAPNodeChecker.isHealth(remoteInstances);
+            if (healthStatus.isHealth()) {
+                this.healthChecker.health();
+            } else {
+                this.healthChecker.unHealth(healthStatus.getReason());
             }
-
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            healthChecker.unHealth(e);
             throw new RuntimeException(e);
         }
-
-        return res;
+        if (log.isDebugEnabled()) {
+            remoteInstances.forEach(instance -> log.debug("Etcd cluster instance: {}", instance));
+        }
+        return remoteInstances;
     }
 
     @Override
     public void registerRemote(RemoteInstance remoteInstance) throws ServiceRegisterException {
-
         if (needUsingInternalAddr()) {
-            remoteInstance = new RemoteInstance(new Address(config.getInternalComHost(), config.getInternalComPort(), true));
+            remoteInstance = new RemoteInstance(
+                new Address(config.getInternalComHost(), config.getInternalComPort(), true));
         }
 
         this.selfAddress = remoteInstance.getAddress();
-        TelemetryRelatedContext.INSTANCE.setId(selfAddress.toString());
-
-        EtcdEndpoint endpoint = new EtcdEndpoint.Builder().serviceName(serviceName)
-                                                          .host(selfAddress.getHost())
-                                                          .port(selfAddress.getPort())
-                                                          .build();
+        final EtcdEndpoint endpoint = new EtcdEndpoint.Builder().serviceName(serviceName)
+                                                                .host(selfAddress.getHost())
+                                                                .port(selfAddress.getPort())
+                                                                .build();
         try {
-            client.putDir(serviceName).send();
-            String key = buildKey(serviceName, selfAddress, remoteInstance);
-            String json = new Gson().toJson(endpoint);
-            EtcdResponsePromise<EtcdKeysResponse> promise = client.put(key, json).ttl(KEY_TTL).send();
-            //check register.
-            promise.get();
-            renew(client, key, json);
-        } catch (Exception e) {
-            throw new ServiceRegisterException(e.getMessage());
-        }
+            final Lease leaseClient = client.getLeaseClient();
+            final long leaseID = leaseClient.grant(30L).get().getID();
 
-    }
+            ByteSequence instance = ByteSequence.from(GSON.toJson(endpoint), Charset.defaultCharset());
+            client.getKVClient()
+                  .put(
+                      buildKey(serviceName, selfAddress, remoteInstance),
+                      instance,
+                      PutOption.newBuilder().withLeaseId(leaseID).build()
+                  )
+                  .get();
+            healthChecker.health();
 
-    private void renew(EtcdClient client, String key, String json) {
-        service.scheduleAtFixedRate(() -> {
-            try {
-                client.refresh(key, KEY_TTL).send().get();
-            } catch (Exception e) {
-                try {
-                    client.put(key, json).ttl(KEY_TTL).send().get();
-                } catch (Exception ee) {
-                    logger.error(ee.getMessage(), ee);
+            client.getLeaseClient().keepAlive(leaseID, new StreamObserver<LeaseKeepAliveResponse>() {
+                @Override
+                public void onNext(final LeaseKeepAliveResponse response) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("Refresh lease id = {}, ttl = {}", response.getID(), response.getTTL());
+                    }
                 }
-            }
-        }, 5 * 1000, 30 * 1000, TimeUnit.MILLISECONDS);
+
+                @Override
+                public void onError(final Throwable throwable) {
+                    log.error("Failed to keep alive in Etcd coordinator", throwable);
+                    healthChecker.unHealth(throwable);
+                }
+
+                @Override
+                public void onCompleted() {
+
+                }
+            });
+        } catch (Throwable e) {
+            healthChecker.unHealth(e);
+            throw new ServiceRegisterException(e);
+        }
     }
 
-    private String buildKey(String serviceName, Address address, RemoteInstance instance) {
-        return new StringBuilder(serviceName).append("/")
-                                             .append(address.getHost())
-                                             .append("_")
-                                             .append(instance.hashCode())
-                                             .toString();
+    private static ByteSequence buildKey(String serviceName, Address address, RemoteInstance instance) {
+        String key = new StringBuilder(serviceName).append(address.getHost())
+                                                   .append("_")
+                                                   .append(instance.hashCode())
+                                                   .toString();
+        return ByteSequence.from(key, Charset.defaultCharset());
     }
 
     private boolean needUsingInternalAddr() {
         return !Strings.isNullOrEmpty(config.getInternalComHost()) && config.getInternalComPort() > 0;
+    }
+
+    private void initHealthChecker() {
+        if (healthChecker == null) {
+            MetricsCreator metricCreator = manager.find(TelemetryModule.NAME)
+                                                  .provider()
+                                                  .getService(MetricsCreator.class);
+            healthChecker = metricCreator.createHealthCheckerGauge(
+                "cluster_etcd", MetricsTag.EMPTY_KEY, MetricsTag.EMPTY_VALUE);
+        }
+    }
+
+    @Override
+    public void start() {
+        initHealthChecker();
+        this.client.getWatchClient().watch(
+            serviceNameBS, WatchOption.newBuilder().withPrefix(serviceNameBS).build(), new EtcdEventListener());
+    }
+
+    class EtcdEventListener implements Watch.Listener {
+        @Override
+        public void onNext(final WatchResponse response) {
+            response.getEvents().forEach(event -> {
+                switch (event.getEventType()) {
+                    case DELETE:
+                    case PUT:
+                        if (log.isDebugEnabled()) {
+                            String key = event.getKeyValue().getKey().toString(Charset.defaultCharset());
+                            log.debug("{}: key = {}}", event.getEventType().name(), key);
+                        }
+                        notifyWatchers(queryRemoteNodes());
+                        break;
+                    default:
+                        break;
+                }
+            });
+        }
+
+        @Override
+        public void onError(final Throwable throwable) {
+            log.error("Failed to notify RemoteInstances update.", throwable);
+            healthChecker.unHealth(throwable);
+        }
+
+        @Override
+        public void onCompleted() {
+        }
     }
 }

@@ -19,27 +19,33 @@
 package org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base;
 
 import java.io.IOException;
+import java.util.Map;
+import java.util.Optional;
+
 import org.apache.skywalking.oap.server.core.analysis.record.Record;
 import org.apache.skywalking.oap.server.core.storage.IRecordDAO;
-import org.apache.skywalking.oap.server.core.storage.StorageBuilder;
 import org.apache.skywalking.oap.server.core.storage.model.Model;
+import org.apache.skywalking.oap.server.core.storage.type.StorageBuilder;
 import org.apache.skywalking.oap.server.library.client.elasticsearch.ElasticSearchClient;
 import org.apache.skywalking.oap.server.library.client.request.InsertRequest;
-import org.elasticsearch.common.xcontent.XContentBuilder;
 
 public class RecordEsDAO extends EsDAO implements IRecordDAO {
-
     private final StorageBuilder<Record> storageBuilder;
 
-    public RecordEsDAO(ElasticSearchClient client, StorageBuilder<Record> storageBuilder) {
+    public RecordEsDAO(ElasticSearchClient client,
+                       StorageBuilder<Record> storageBuilder) {
         super(client);
         this.storageBuilder = storageBuilder;
     }
 
     @Override
     public InsertRequest prepareBatchInsert(Model model, Record record) throws IOException {
-        XContentBuilder builder = map2builder(storageBuilder.data2Map(record));
+        final ElasticSearchConverter.ToStorage toStorage = new ElasticSearchConverter.ToStorage(model.getName());
+        storageBuilder.entity2Storage(record, toStorage);
+        Map<String, Object> builder = IndexController.INSTANCE.appendTableColumn(model, toStorage.obtain());
         String modelName = TimeSeriesUtils.writeIndexName(model, record.getTimeBucket());
-        return getClient().prepareInsert(modelName, record.id(), builder);
+        String id = IndexController.INSTANCE.generateDocId(model, record.id().build());
+        Optional<String> routingValue = RoutingUtils.getRoutingValue(model, toStorage);
+        return getClient().prepareInsert(modelName, id, routingValue, builder);
     }
 }

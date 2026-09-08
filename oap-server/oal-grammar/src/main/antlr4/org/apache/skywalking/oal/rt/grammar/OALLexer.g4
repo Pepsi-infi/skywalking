@@ -27,40 +27,82 @@ lexer grammar OALLexer;
 FROM: 'from';
 FILTER: 'filter';
 DISABLE: 'disable';
-SRC_ALL: 'All';
 SRC_SERVICE: 'Service';
+SRC_TCP_SERVICE: 'TCPService';
 SRC_SERVICE_INSTANCE: 'ServiceInstance';
+SRC_TCP_SERVICE_INSTANCE: 'TCPServiceInstance';
 SRC_ENDPOINT: 'Endpoint';
 SRC_SERVICE_RELATION: 'ServiceRelation';
+SRC_TCP_SERVICE_RELATION: 'TCPServiceRelation';
 SRC_SERVICE_INSTANCE_RELATION: 'ServiceInstanceRelation';
+SRC_TCP_SERVICE_INSTANCE_RELATION: 'TCPServiceInstanceRelation';
 SRC_ENDPOINT_RELATION: 'EndpointRelation';
 SRC_SERVICE_INSTANCE_JVM_CPU: 'ServiceInstanceJVMCPU';
 SRC_SERVICE_INSTANCE_JVM_MEMORY: 'ServiceInstanceJVMMemory';
 SRC_SERVICE_INSTANCE_JVM_MEMORY_POOL: 'ServiceInstanceJVMMemoryPool';
 SRC_SERVICE_INSTANCE_JVM_GC: 'ServiceInstanceJVMGC';
+SRC_SERVICE_INSTANCE_JVM_THREAD: 'ServiceInstanceJVMThread';
+SRC_SERVICE_INSTANCE_JVM_CLASS: 'ServiceInstanceJVMClass';
 SRC_DATABASE_ACCESS: 'DatabaseAccess';
 SRC_SERVICE_INSTANCE_CLR_CPU: 'ServiceInstanceCLRCPU';
 SRC_SERVICE_INSTANCE_CLR_GC: 'ServiceInstanceCLRGC';
 SRC_SERVICE_INSTANCE_CLR_THREAD: 'ServiceInstanceCLRThread';
 SRC_ENVOY_INSTANCE_METRIC: 'EnvoyInstanceMetric';
+SRC_EVENT: 'Event';
+SRC_CACHE_ACCESS: 'CacheAccess';
+SRC_MQ_ACCESS: 'MQAccess';
+SRC_MQ_ENDPOINT_ACCESS: 'MQEndpointAccess';
+SRC_K8S_SERVICE: 'K8SService';
+SRC_K8S_SERVICE_INSTANCE: 'K8SServiceInstance';
+SRC_K8S_ENDPOINT: 'K8SEndpoint';
+SRC_K8S_SERVICE_RELATION: 'K8SServiceRelation';
+SRC_K8S_SERVICE_INSTANCE_RELATION: 'K8SServiceInstanceRelation';
+SRC_CILIUM_SERVICE: 'CiliumService';
+SRC_CILIUM_SERVICE_INSTANCE: 'CiliumServiceInstance';
+SRC_CILIUM_ENDPOINT: 'CiliumEndpoint';
+SRC_CILIUM_SERVICE_RELATION: 'CiliumServiceRelation';
+SRC_CILIUM_SERVICE_INSTANCE_RELATION: 'CiliumServiceInstanceRelation';
+SRC_CILIUM_ENDPOINT_RELATION: 'CiliumEndpointRelation';
+SRC_GEN_AI_PROVIDER_ACCESS: 'GenAIProviderAccess';
+SRC_GEN_AI_MODEL_ACCESS: 'GenAIModelAccess';
+DECORATOR: 'decorator';
 
-//hard code entities, only used when need to be deactived.
-//Disable is targeting @Stream#name
-SRC_SEGMENT: 'segment';
-SRC_TOP_N_DB_STATEMENT: 'top_n_database_statement';
-SRC_ENDPOINT_RELATION_SERVER_SIDE: 'endpoint_relation_server_side';
-SRC_SERVICE_RELATION_SERVER_SIDE: 'service_relation_server_side';
-SRC_SERVICE_RELATION_CLIENT_SIDE: 'service_relation_client_side';
-SRC_ALARM_RECORD: 'alarm_record';
-SRC_HTTP_ACCESS_LOG: 'http_access_log';
 
-SRC_ZIPKIN_SPAN: 'zipkin_span';
-SRC_JAEGER_SPAN: 'jaeger_span';
-SRC_PROFILE_TASK: 'profile_task';
-SRC_PROFILE_TASK_LOG: 'profile_task_log';
-SRC_PROFILE_THREAD_SHANPSHOT: 'profile_task_segment_snapshot';
+// Browser keywords
+SRC_BROWSER_APP_PERF: 'BrowserAppPerf';
+SRC_BROWSER_APP_PAGE_PERF: 'BrowserAppPagePerf';
+SRC_BROWSER_APP_SINGLE_VERSION_PERF: 'BrowserAppSingleVersionPerf';
+SRC_BROWSER_APP_TRAFFIC: 'BrowserAppTraffic';
+SRC_BROWSER_APP_PAGE_TRAFFIC: 'BrowserAppPageTraffic';
+SRC_BROWSER_APP_SINGLE_VERSION_TRAFFIC: 'BrowserAppSingleVersionTraffic';
+SRC_BROWSER_APP_RESOURCE_PERF: 'BrowserAppResourcePerf';
+SRC_BROWSER_APP_WEB_VITALS_PERF: 'BrowserAppWebVitalsPerf';
+SRC_BROWSER_APP_WEB_INTERACTION_PERF: 'BrowserAppWebInteractionPerf';
+
+// Constructors symbols
+
+DOT:                                 '.';
+LR_BRACKET:                          '(';
+RR_BRACKET:                          ')';
+LS_BRACKET:                          '[';
+RS_BRACKET:                          ']';
+COMMA:                               ',';
+SEMI:                                ';';
+EQUAL:                               '=';
+DUALEQUALS:                          '==';
+ALL:                                 '*';
+GREATER:                             '>';
+LESS:                                '<';
+GREATER_EQUAL:                       '>=';
+LESS_EQUAL:                          '<=';
+NOT_EQUAL:                           '!=';
+LIKE:                                'like';
+IN:                                  'in';
+CONTAIN:                            'contain';
+NOT_CONTAIN:                        'not contain';
 
 // Literals
+NULL_LITERAL:                       'null';
 
 BOOL_LITERAL:       'true'
             |       'false'
@@ -105,7 +147,7 @@ fragment HexDigit
     ;
 
 fragment Digits
-    : [0-9] ([0-9_]* [0-9])?
+    : [0-9] ([0-9_]* [0-9])? ('l'|'L')?
     ;
 
 fragment LetterOrDigit
@@ -119,17 +161,8 @@ fragment Letter
     | [\uD800-\uDBFF] [\uDC00-\uDFFF] // covers UTF-16 surrogate pairs encodings for U+10000 to U+10FFFF
     ;
 
-// Constructors symbols
-
-DOT:                                 '.';
-LR_BRACKET:                          '(';
-RR_BRACKET:                          ')';
-COMMA:                               ',';
-SEMI:                                ';';
-EQUAL:                               '=';
-DUALEQUALS:                          '==';
-ALL:                                 '*';
-GREATER:                             '>';
-LESS:                                '<';
-GREATER_EQUAL:                       '>=';
-LESS_EQUAL:                          '<=';
+// Type cast rule
+STRING_TO_LONG:                                '(str->long)';
+STRING_TO_LONG_SHORT:                          '(long)';
+STRING_TO_INT:                                 '(str->int)';
+STRING_TO_INT_SHORT:                           '(int)';

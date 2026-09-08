@@ -20,10 +20,10 @@ package org.apache.skywalking.oap.server.configuration.consul;
 
 import com.google.common.base.Splitter;
 import com.google.common.net.HostAndPort;
-import com.orbitz.consul.Consul;
-import com.orbitz.consul.KeyValueClient;
-import com.orbitz.consul.cache.KVCache;
-import com.orbitz.consul.model.kv.Value;
+import org.kiwiproject.consul.Consul;
+import org.kiwiproject.consul.KeyValueClient;
+import org.kiwiproject.consul.cache.KVCache;
+import org.kiwiproject.consul.model.kv.Value;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -31,16 +31,15 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.skywalking.oap.server.configuration.api.ConfigTable;
-import org.apache.skywalking.oap.server.configuration.api.ConfigWatcherRegister;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.skywalking.oap.server.configuration.api.FetchingConfigWatcherRegister;
+import org.apache.skywalking.oap.server.configuration.api.GroupConfigTable;
 
 @SuppressWarnings("UnstableApiUsage")
-public class ConsulConfigurationWatcherRegister extends ConfigWatcherRegister {
-    private static final Logger LOGGER = LoggerFactory.getLogger(ConsulConfigurationWatcherRegister.class);
-
+@Slf4j
+public class ConsulConfigurationWatcherRegister extends FetchingConfigWatcherRegister {
     private static final int DEFAULT_PORT = 8500;
 
     private final KeyValueClient consul;
@@ -60,7 +59,8 @@ public class ConsulConfigurationWatcherRegister extends ConfigWatcherRegister {
                                                                                 .withDefaultPort(DEFAULT_PORT))
                                                  .collect(Collectors.toList());
 
-        Consul.Builder builder = Consul.builder().withConnectTimeoutMillis(3000);
+        Consul.Builder builder = Consul.builder().withConnectTimeoutMillis(3_000)
+                                       .withReadTimeoutMillis(20_000);
 
         if (hostAndPorts.size() == 1) {
             builder.withHostAndPort(hostAndPorts.get(0));
@@ -92,6 +92,26 @@ public class ConsulConfigurationWatcherRegister extends ConfigWatcherRegister {
         });
 
         return Optional.of(table);
+    }
+
+    @Override
+    public Optional<GroupConfigTable> readGroupConfig(final Set<String> keys) {
+        GroupConfigTable groupConfigTable = new GroupConfigTable();
+        keys.forEach(key -> {
+            GroupConfigTable.GroupConfigItems groupConfigItems = new GroupConfigTable.GroupConfigItems(key);
+            groupConfigTable.addGroupConfigItems(groupConfigItems);
+            String groupKey = key + "/";
+            List<String> groupItemKeys = this.consul.getKeys(groupKey);
+            if (groupItemKeys != null) {
+                groupItemKeys.stream().filter(it -> !groupKey.equals(it)).forEach(groupItemKey -> {
+                    Optional<String> itemValue = this.consul.getValueAsString(groupItemKey);
+                    String itemName = groupItemKey.substring(groupKey.length());
+                    groupConfigItems.add(
+                        new ConfigTable.ConfigItem(itemName, itemValue.orElse(null)));
+                });
+            }
+        });
+        return Optional.of(groupConfigTable);
     }
 
     private void registerKeyListeners(final Set<String> keys) {
@@ -126,8 +146,8 @@ public class ConsulConfigurationWatcherRegister extends ConfigWatcherRegister {
     }
 
     private void onKeyValueChanged(String key, String value) {
-        if (LOGGER.isInfoEnabled()) {
-            LOGGER.info("Consul config changed: {}: {}", key, value);
+        if (log.isInfoEnabled()) {
+            log.info("Consul config changed: {}: {}", key, value);
         }
 
         configItemKeyedByName.put(key, Optional.ofNullable(value));

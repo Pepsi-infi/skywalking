@@ -19,71 +19,116 @@
 package org.apache.skywalking.oap.server.storage.plugin.elasticsearch;
 
 import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.security.KeyManagementException;
-import java.security.KeyStoreException;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.CertificateException;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Properties;
-import org.apache.skywalking.apm.util.StringUtil;
+import java.util.function.Function;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.skywalking.oap.server.core.CoreModule;
+import org.apache.skywalking.oap.server.core.config.ConfigService;
+import org.apache.skywalking.oap.server.core.management.ui.template.UITemplate;
+import org.apache.skywalking.oap.server.core.profiling.continuous.storage.ContinuousProfilingPolicy;
 import org.apache.skywalking.oap.server.core.storage.IBatchDAO;
 import org.apache.skywalking.oap.server.core.storage.IHistoryDeleteDAO;
+import org.apache.skywalking.oap.server.core.storage.StorageBuilderFactory;
 import org.apache.skywalking.oap.server.core.storage.StorageDAO;
-import org.apache.skywalking.oap.server.core.storage.StorageException;
 import org.apache.skywalking.oap.server.core.storage.StorageModule;
 import org.apache.skywalking.oap.server.core.storage.cache.INetworkAddressAliasDAO;
-import org.apache.skywalking.oap.server.core.storage.profile.IProfileTaskLogQueryDAO;
-import org.apache.skywalking.oap.server.core.storage.profile.IProfileTaskQueryDAO;
-import org.apache.skywalking.oap.server.core.storage.profile.IProfileThreadSnapshotQueryDAO;
+import org.apache.skywalking.oap.server.core.management.runtimerule.RuntimeRule;
+import org.apache.skywalking.oap.server.core.storage.management.RuntimeRuleManagementDAO;
+import org.apache.skywalking.oap.server.core.storage.management.UITemplateManagementDAO;
+import org.apache.skywalking.oap.server.core.storage.model.ModelRegistry;
+import org.apache.skywalking.oap.server.core.storage.model.ModelInstaller;
+import org.apache.skywalking.oap.server.core.storage.profiling.asyncprofiler.IAsyncProfilerTaskLogQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.asyncprofiler.IAsyncProfilerTaskQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.asyncprofiler.IJFRDataQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.pprof.IPprofTaskLogQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.pprof.IPprofTaskQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.pprof.IPprofDataQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.continuous.IContinuousProfilingPolicyDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.ebpf.IEBPFProfilingDataDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.ebpf.IEBPFProfilingScheduleDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.ebpf.IEBPFProfilingTaskDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.ebpf.IServiceLabelDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.trace.IProfileTaskLogQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.trace.IProfileTaskQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.profiling.trace.IProfileThreadSnapshotQueryDAO;
 import org.apache.skywalking.oap.server.core.storage.query.IAggregationQueryDAO;
 import org.apache.skywalking.oap.server.core.storage.query.IAlarmQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IBrowserLogQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IEventQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IAIAgentConversationQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IGenAIEvaluationRecordQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IHierarchyQueryDAO;
 import org.apache.skywalking.oap.server.core.storage.query.ILogQueryDAO;
 import org.apache.skywalking.oap.server.core.storage.query.IMetadataQueryDAO;
 import org.apache.skywalking.oap.server.core.storage.query.IMetricsQueryDAO;
-import org.apache.skywalking.oap.server.core.storage.query.ITopNRecordsQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IRecordsQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.ISpanAttachedEventQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.ITagAutoCompleteQueryDAO;
 import org.apache.skywalking.oap.server.core.storage.query.ITopologyQueryDAO;
 import org.apache.skywalking.oap.server.core.storage.query.ITraceQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.query.IZipkinQueryDAO;
+import org.apache.skywalking.oap.server.core.storage.ttl.DefaultStorageTTLStatusQuery;
+import org.apache.skywalking.oap.server.core.storage.ttl.StorageTTLStatusQuery;
 import org.apache.skywalking.oap.server.library.client.elasticsearch.ElasticSearchClient;
-import org.apache.skywalking.oap.server.library.client.elasticsearch.IndexNameConverter;
-import org.apache.skywalking.oap.server.library.module.ModuleConfig;
 import org.apache.skywalking.oap.server.library.module.ModuleDefine;
 import org.apache.skywalking.oap.server.library.module.ModuleProvider;
 import org.apache.skywalking.oap.server.library.module.ModuleStartException;
 import org.apache.skywalking.oap.server.library.module.ServiceNotProvidedException;
 import org.apache.skywalking.oap.server.library.util.MultipleFilesChangeMonitor;
+import org.apache.skywalking.oap.server.library.util.StringUtil;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.BatchProcessEsDAO;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.HistoryDeleteEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.IndexController;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.StorageEsDAO;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.StorageEsInstaller;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.base.TimeSeriesUtils;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.cache.NetworkAddressAliasEsDAO;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.AggregationQueryEsDAO;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.AlarmQueryEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.AsyncProfilerTaskLogQueryEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.AsyncProfilerTaskQueryEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.PprofTaskLogQueryEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.BrowserLogQueryEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.ContinuousProfilingPolicyEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.EBPFProfilingDataEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.EBPFProfilingScheduleEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.EBPFProfilingTaskEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.ESEventQueryDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.HierarchyQueryEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.AIAgentConversationQueryEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.GenAIEvaluationRecordQueryEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.JFRDataQueryEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.PprofDataQueryEsDAO;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.LogQueryEsDAO;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.MetadataQueryEsDAO;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.MetricsQueryEsDAO;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.ProfileTaskLogEsDAO;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.ProfileTaskQueryEsDAO;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.ProfileThreadSnapshotQueryEsDAO;
-import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.TopNRecordsQueryEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.PprofTaskQueryEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.RecordsQueryEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.ServiceLabelEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.SpanAttachedEventEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.TagAutoCompleteQueryDAO;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.TopologyQueryEsDAO;
 import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.TraceQueryEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.RuntimeRuleManagementEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.UITemplateManagementEsDAO;
+import org.apache.skywalking.oap.server.storage.plugin.elasticsearch.query.zipkin.ZipkinQueryEsDAO;
+import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
+import org.apache.skywalking.oap.server.telemetry.api.HealthCheckMetrics;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsCreator;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsTag;
 
 /**
- * The storage provider for ElasticSearch 6.
+ * The storage provider for ElasticSearch 6/7 and OpenSearch 1.x.
  */
+@Slf4j
 public class StorageModuleElasticsearchProvider extends ModuleProvider {
 
-    protected final StorageModuleElasticsearchConfig config;
+    protected StorageModuleElasticsearchConfig config;
     protected ElasticSearchClient elasticSearchClient;
-
-    public StorageModuleElasticsearchProvider() {
-        super();
-        this.config = new StorageModuleElasticsearchConfig();
-    }
+    protected StorageEsInstaller modelInstaller;
 
     @Override
     public String name() {
@@ -96,17 +141,35 @@ public class StorageModuleElasticsearchProvider extends ModuleProvider {
     }
 
     @Override
-    public ModuleConfig createConfigBeanIfAbsent() {
-        return config;
+    public ConfigCreator newConfigCreator() {
+        return new ConfigCreator<StorageModuleElasticsearchConfig>() {
+            @Override
+            public Class type() {
+                return StorageModuleElasticsearchConfig.class;
+            }
+
+            @Override
+            public void onInitialized(final StorageModuleElasticsearchConfig initialized) {
+                config = initialized;
+            }
+        };
     }
 
     @Override
     public void prepare() throws ServiceNotProvidedException {
-        if (!StringUtil.isEmpty(config.getNameSpace())) {
-            config.setNameSpace(config.getNameSpace().toLowerCase());
+        this.registerServiceImplementation(StorageBuilderFactory.class, new StorageBuilderFactory.Default());
+
+        if (StringUtil.isEmpty(config.getNamespace())) {
+            config.setNamespace("sw");
+        } else {
+            config.setNamespace(config.getNamespace().toLowerCase());
         }
         if (config.getDayStep() > 1) {
             TimeSeriesUtils.setDAY_STEP(config.getDayStep());
+            TimeSeriesUtils.setSUPER_DATASET_DAY_STEP(config.getDayStep());
+        }
+        if (config.getSuperDatasetDayStep() > 0) {
+            TimeSeriesUtils.setSUPER_DATASET_DAY_STEP(config.getSuperDatasetDayStep());
         }
 
         if (!StringUtil.isEmpty(config.getSecretsManagementFile())) {
@@ -121,6 +184,7 @@ public class StorageModuleElasticsearchProvider extends ModuleProvider {
                 config.setUser(secrets.getProperty("user", null));
                 config.setPassword(secrets.getProperty("password", null));
                 config.setTrustStorePass(secrets.getProperty("trustStorePass", null));
+                config.setKeyStorePass(secrets.getProperty("keyStorePass", null));
 
                 if (elasticSearchClient == null) {
                     // In the startup process, we just need to change the username/password
@@ -129,40 +193,62 @@ public class StorageModuleElasticsearchProvider extends ModuleProvider {
                     elasticSearchClient.setUser(config.getUser());
                     elasticSearchClient.setPassword(config.getPassword());
                     elasticSearchClient.setTrustStorePass(config.getTrustStorePass());
+                    elasticSearchClient.setKeyStorePass(config.getKeyStorePass());
                     elasticSearchClient.connect();
                 }
-            }, config.getSecretsManagementFile(), config.getTrustStorePass());
-            /**
+            }, config.getSecretsManagementFile(), config.getTrustStorePath(), config.getKeyStorePath());
+            /*
              * By leveraging the sync update check feature when startup.
              */
             monitor.start();
         }
 
+        // Validate keystore configuration
+        validateKeystoreConfiguration(config);
+
         elasticSearchClient = new ElasticSearchClient(
-            config.getClusterNodes(), config.getProtocol(), config.getTrustStorePath(), config
-            .getTrustStorePass(), config.getUser(), config.getPassword(),
-            indexNameConverters(config.getNameSpace())
+            getManager(),
+            config.getClusterNodes(), config.getProtocol(), 
+            config.getTrustStorePath(), config.getTrustStorePass(),
+            config.getKeyStorePath(), config.getKeyStorePass(),
+            config.getUser(), config.getPassword(),
+            indexNameConverter(config.getNamespace()), 
+            config.getConnectTimeout(),
+            config.getSocketTimeout(), config.getResponseTimeout(),
+            config.getNumHttpClientThread()
         );
+        modelInstaller = new StorageEsInstaller(elasticSearchClient, getManager(), config);
+        // Expose the installer so the runtime-rule reconciler can call isExists() after a
+        // hot-apply to verify that DDL landed. On ES, verify compares
+        // the logic-shard structure + mapping + index settings; a missing field / mapping
+        // diff surfaces as a clear WARN to operators.
+        this.registerServiceImplementation(ModelInstaller.class, modelInstaller);
 
         this.registerServiceImplementation(
-            IBatchDAO.class, new BatchProcessEsDAO(elasticSearchClient, config.getBulkActions(), config
-                .getFlushInterval(), config.getConcurrentRequests()));
+            IBatchDAO.class,
+            new BatchProcessEsDAO(elasticSearchClient, config.getBulkActions(), config
+                .getFlushInterval(), config.getConcurrentRequests(), config.getBatchOfBytes())
+        );
         this.registerServiceImplementation(StorageDAO.class, new StorageEsDAO(elasticSearchClient));
         this.registerServiceImplementation(
             IHistoryDeleteDAO.class, new HistoryDeleteEsDAO(elasticSearchClient));
         this.registerServiceImplementation(
-            INetworkAddressAliasDAO.class, new NetworkAddressAliasEsDAO(elasticSearchClient, config
-                .getResultWindowMaxSize()));
+            INetworkAddressAliasDAO.class, new NetworkAddressAliasEsDAO(elasticSearchClient, config));
         this.registerServiceImplementation(ITopologyQueryDAO.class, new TopologyQueryEsDAO(elasticSearchClient));
         this.registerServiceImplementation(IMetricsQueryDAO.class, new MetricsQueryEsDAO(elasticSearchClient));
         this.registerServiceImplementation(
             ITraceQueryDAO.class, new TraceQueryEsDAO(elasticSearchClient, config.getSegmentQueryMaxSize()));
+        this.registerServiceImplementation(IBrowserLogQueryDAO.class, new BrowserLogQueryEsDAO(elasticSearchClient));
         this.registerServiceImplementation(
-            IMetadataQueryDAO.class, new MetadataQueryEsDAO(elasticSearchClient, config.getMetadataQueryMaxSize()));
+            IMetadataQueryDAO.class, new MetadataQueryEsDAO(elasticSearchClient, config));
         this.registerServiceImplementation(IAggregationQueryDAO.class, new AggregationQueryEsDAO(elasticSearchClient));
         this.registerServiceImplementation(IAlarmQueryDAO.class, new AlarmQueryEsDAO(elasticSearchClient));
-        this.registerServiceImplementation(ITopNRecordsQueryDAO.class, new TopNRecordsQueryEsDAO(elasticSearchClient));
+        this.registerServiceImplementation(IRecordsQueryDAO.class, new RecordsQueryEsDAO(elasticSearchClient));
         this.registerServiceImplementation(ILogQueryDAO.class, new LogQueryEsDAO(elasticSearchClient));
+        this.registerServiceImplementation(
+            IGenAIEvaluationRecordQueryDAO.class, new GenAIEvaluationRecordQueryEsDAO(elasticSearchClient));
+        this.registerServiceImplementation(
+            IAIAgentConversationQueryDAO.class, new AIAgentConversationQueryEsDAO(elasticSearchClient));
         this.registerServiceImplementation(
             IProfileTaskQueryDAO.class, new ProfileTaskQueryEsDAO(elasticSearchClient, config
                 .getProfileTaskQueryMaxSize()));
@@ -172,17 +258,95 @@ public class StorageModuleElasticsearchProvider extends ModuleProvider {
         this.registerServiceImplementation(
             IProfileThreadSnapshotQueryDAO.class, new ProfileThreadSnapshotQueryEsDAO(elasticSearchClient, config
                 .getProfileTaskQueryMaxSize()));
+        this.registerServiceImplementation(
+            UITemplateManagementDAO.class, new UITemplateManagementEsDAO(elasticSearchClient, new UITemplate.Builder()));
+        this.registerServiceImplementation(
+            RuntimeRuleManagementDAO.class, new RuntimeRuleManagementEsDAO(elasticSearchClient, new RuntimeRule.Builder()));
+
+        this.registerServiceImplementation(IEventQueryDAO.class, new ESEventQueryDAO(elasticSearchClient));
+
+        this.registerServiceImplementation(
+            IEBPFProfilingTaskDAO.class,
+            new EBPFProfilingTaskEsDAO(elasticSearchClient, config)
+        );
+        this.registerServiceImplementation(
+            IEBPFProfilingScheduleDAO.class,
+            new EBPFProfilingScheduleEsDAO(elasticSearchClient, config)
+        );
+        this.registerServiceImplementation(
+            IEBPFProfilingDataDAO.class,
+            new EBPFProfilingDataEsDAO(elasticSearchClient, config)
+        );
+        this.registerServiceImplementation(
+            IContinuousProfilingPolicyDAO.class,
+            new ContinuousProfilingPolicyEsDAO(elasticSearchClient, new ContinuousProfilingPolicy.Builder())
+        );
+        this.registerServiceImplementation(
+            IServiceLabelDAO.class,
+            new ServiceLabelEsDAO(elasticSearchClient, config)
+        );
+        this.registerServiceImplementation(
+            ITagAutoCompleteQueryDAO.class, new TagAutoCompleteQueryDAO(elasticSearchClient));
+        this.registerServiceImplementation(
+            IZipkinQueryDAO.class, new ZipkinQueryEsDAO(elasticSearchClient));
+        this.registerServiceImplementation(
+            ISpanAttachedEventQueryDAO.class, new SpanAttachedEventEsDAO(elasticSearchClient, config));
+
+        this.registerServiceImplementation(
+                IAsyncProfilerTaskQueryDAO.class,
+                new AsyncProfilerTaskQueryEsDAO(elasticSearchClient, config.getAsyncProfilerTaskQueryMaxSize())
+        );
+        this.registerServiceImplementation(
+                IAsyncProfilerTaskLogQueryDAO.class,
+                new AsyncProfilerTaskLogQueryEsDAO(elasticSearchClient, config.getAsyncProfilerTaskQueryMaxSize())
+        );
+        this.registerServiceImplementation(
+                IJFRDataQueryDAO.class,
+                new JFRDataQueryEsDAO(elasticSearchClient)
+        );
+        this.registerServiceImplementation(
+                IPprofTaskQueryDAO.class,
+                new PprofTaskQueryEsDAO(elasticSearchClient, config.getPprofTaskQueryMaxSize())
+        );
+        this.registerServiceImplementation(
+                IPprofTaskLogQueryDAO.class,
+                new PprofTaskLogQueryEsDAO(elasticSearchClient, config.getPprofTaskQueryMaxSize())
+        );
+        this.registerServiceImplementation(
+                IPprofDataQueryDAO.class,
+                new PprofDataQueryEsDAO(elasticSearchClient)
+        );
+        this.registerServiceImplementation(
+            StorageTTLStatusQuery.class,
+            new DefaultStorageTTLStatusQuery()
+        );
+        IndexController.INSTANCE.setLogicSharding(config.isLogicSharding());
+        IndexController.INSTANCE.setEnableCustomRouting(config.isEnableCustomRouting());
+        this.registerServiceImplementation(IHierarchyQueryDAO.class, new HierarchyQueryEsDAO(elasticSearchClient, config));
     }
 
     @Override
     public void start() throws ModuleStartException {
+        MetricsCreator metricCreator = getManager().find(TelemetryModule.NAME)
+                                                   .provider()
+                                                   .getService(MetricsCreator.class);
+        HealthCheckMetrics healthChecker = metricCreator.createHealthCheckerGauge(
+            "storage_elasticsearch", MetricsTag.EMPTY_KEY, MetricsTag.EMPTY_VALUE);
+        elasticSearchClient.registerChecker(healthChecker);
         try {
             elasticSearchClient.connect();
 
-            StorageEsInstaller installer = new StorageEsInstaller(getManager(), config);
-            installer.install(elasticSearchClient);
+            final ConfigService service = getManager().find(CoreModule.NAME).provider().getService(ConfigService.class);
+            // Add 5s to make sure OAP has at least done persistent once.
+            // By default, the persistent period is 25 seconds and ElasticSearch refreshes in every 30 seconds.
+            modelInstaller.setIndexRefreshInterval(service.getPersistentPeriod() + 5);
+            modelInstaller.start();
 
-        } catch (StorageException | IOException | KeyStoreException | NoSuchAlgorithmException | KeyManagementException | CertificateException e) {
+            getManager().find(CoreModule.NAME)
+                        .provider()
+                        .getService(ModelRegistry.class)
+                        .addModelListener(modelInstaller);
+        } catch (Exception e) {
             throw new ModuleStartException(e.getMessage(), e);
         }
     }
@@ -196,26 +360,37 @@ public class StorageModuleElasticsearchProvider extends ModuleProvider {
         return new String[] {CoreModule.NAME};
     }
 
-    public static List<IndexNameConverter> indexNameConverters(String namespace) {
-        List<IndexNameConverter> converters = new ArrayList<>();
-        converters.add(new NamespaceConverter(namespace));
-        return converters;
-    }
-
-    private static class NamespaceConverter implements IndexNameConverter {
-        private final String namespace;
-
-        public NamespaceConverter(final String namespace) {
-            this.namespace = namespace;
-        }
-
-        @Override
-        public String convert(final String indexName) {
+    public static Function<String, String> indexNameConverter(String namespace) {
+        return indexName -> {
             if (StringUtil.isNotEmpty(namespace)) {
                 return namespace + "_" + indexName;
             }
-
             return indexName;
+        };
+    }
+
+    /**
+     * Validates keystore configuration to ensure mutual TLS setup is complete.
+     * If keyStorePath is provided, keyStorePass must also be provided (can be empty string for no password).
+     */
+    private void validateKeystoreConfiguration(StorageModuleElasticsearchConfig config) {
+        final boolean hasKeyStorePath = !StringUtil.isEmpty(config.getKeyStorePath());
+        final boolean hasKeyStorePass = config.getKeyStorePass() != null;
+
+        if (hasKeyStorePath && !hasKeyStorePass) {
+            throw new IllegalArgumentException(
+                "keyStorePass must be provided when keyStorePath is configured for client certificate authentication. " +
+                "Use empty string (\"\") for keystores without password."
+            );
+        }
+
+        if (!hasKeyStorePath && hasKeyStorePass) {
+            log.warn("keyStorePass is configured but keyStorePath is not set. The keyStorePass will be ignored.");
+        }
+
+        if (hasKeyStorePath) {
+            log.info("Client certificate authentication (mutual TLS) is enabled with keystore: {}", 
+                config.getKeyStorePath());
         }
     }
 }

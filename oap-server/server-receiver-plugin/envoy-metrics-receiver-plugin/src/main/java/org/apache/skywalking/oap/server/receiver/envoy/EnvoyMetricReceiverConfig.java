@@ -18,20 +18,94 @@
 
 package org.apache.skywalking.oap.server.receiver.envoy;
 
+import com.google.common.base.Splitter;
 import com.google.common.base.Strings;
+
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
+import lombok.Getter;
+import org.apache.skywalking.oap.meter.analyzer.v2.prometheus.rule.Rule;
+import org.apache.skywalking.oap.meter.analyzer.v2.prometheus.rule.Rules;
 import org.apache.skywalking.oap.server.library.module.ModuleConfig;
+import org.apache.skywalking.oap.server.library.module.ModuleStartException;
+import org.apache.skywalking.oap.server.receiver.envoy.metrics.adapters.ClusterManagerMetricsAdapter;
+import org.apache.skywalking.oap.server.receiver.envoy.metrics.adapters.ListenerMetricsAdapter;
 
 public class EnvoyMetricReceiverConfig extends ModuleConfig {
+    @Getter
+    private boolean acceptMetricsService = false;
     private String alsHTTPAnalysis;
+    private String alsTCPAnalysis;
+    @Getter
+    private String k8sServiceNameRule;
+    @Getter
+    private String istioServiceNameRule;
+    private String istioServiceEntryIgnoredNamespaces;
+
+    @Getter
+    private String gRPCHost;
+    @Getter
+    private int gRPCPort;
+    @Getter
+    private int maxConcurrentCallsPerConnection;
+    @Getter
+    private int maxMessageSize;
+    @Getter
+    private int gRPCThreadPoolSize;
+    @Getter
+    private boolean gRPCSslEnabled = false;
+    @Getter
+    private String gRPCSslKeyPath;
+    @Getter
+    private String gRPCSslCertChainPath;
+    @Getter
+    private String gRPCSslTrustedCAsPath;
+    @Getter
+    private String enabledEnvoyMetricsRules;
+
+    private final ServiceMetaInfoFactory serviceMetaInfoFactory = new ServiceMetaInfoFactoryImpl();
+    @Getter
+    private final ClusterManagerMetricsAdapter clusterManagerMetricsAdapter = new ClusterManagerMetricsAdapter(this);
+    @Getter
+    private final ListenerMetricsAdapter listenerMetricsAdapter = new ListenerMetricsAdapter();
 
     public List<String> getAlsHTTPAnalysis() {
         if (Strings.isNullOrEmpty(alsHTTPAnalysis)) {
-            return Collections.EMPTY_LIST;
+            return Collections.emptyList();
         }
         return Arrays.stream(alsHTTPAnalysis.trim().split(",")).map(String::trim).collect(Collectors.toList());
+    }
+
+    public List<String> getAlsTCPAnalysis() {
+        if (Strings.isNullOrEmpty(alsTCPAnalysis)) {
+            return Collections.emptyList();
+        }
+        return Arrays.stream(alsTCPAnalysis.trim().split(",")).map(String::trim).collect(Collectors.toList());
+    }
+
+    public List<Rule> rules() throws ModuleStartException {
+        try {
+            final List<String> enabledRules =
+                Splitter.on(",")
+                        .omitEmptyStrings()
+                        .trimResults()
+                        .splitToList(enabledEnvoyMetricsRules);
+            return Rules.loadRules("envoy-metrics-rules", enabledRules);
+        } catch (IOException e) {
+            throw new ModuleStartException("Failed to load envoy-metrics-rules", e);
+        }
+    }
+
+    public ServiceMetaInfoFactory serviceMetaInfoFactory() {
+        return serviceMetaInfoFactory;
+    }
+
+    public Set<String> getIstioServiceEntryIgnoredNamespaces() {
+        final var s = Strings.nullToEmpty(istioServiceEntryIgnoredNamespaces);
+        return Splitter.on(",").omitEmptyStrings().trimResults().splitToStream(s).collect(Collectors.toSet());
     }
 }

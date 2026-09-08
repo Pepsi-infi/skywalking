@@ -18,12 +18,13 @@
 
 package org.apache.skywalking.oap.query.graphql.resolver;
 
-import com.coxautodev.graphql.tools.GraphQLQueryResolver;
+import graphql.kickstart.tools.GraphQLQueryResolver;
 import java.io.IOException;
-import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.skywalking.oap.query.graphql.type.BatchMetricConditions;
 import org.apache.skywalking.oap.server.core.query.input.Duration;
 import org.apache.skywalking.oap.server.core.query.input.Entity;
@@ -41,6 +42,7 @@ import org.apache.skywalking.oap.server.library.module.ModuleManager;
  * @since 8.0.0 This query is replaced by {@link MetricsQuery}
  */
 @Deprecated
+@Slf4j
 public class MetricQuery implements GraphQLQueryResolver {
     private MetricsQuery query;
 
@@ -57,37 +59,37 @@ public class MetricQuery implements GraphQLQueryResolver {
             condition.setName(metrics.getName());
             condition.setEntity(new MockEntity(null));
 
-            kv.setValue(query.readMetricsValue(condition, duration));
+            kv.setValue(query.readMetricsValue(condition, duration).join());
+            values.addKVInt(kv);
         } else {
-            for (final String id : metrics.getIds()) {
-                KVInt kv = new KVInt();
-                kv.setId(id);
-
+            List<KVInt> ints = metrics.getIds().parallelStream().map(id -> {
                 MetricsCondition condition = new MetricsCondition();
                 condition.setName(metrics.getName());
                 condition.setEntity(new MockEntity(id));
+                KVInt kv = new KVInt();
+                kv.setId(id);
+                kv.setValue(query.readMetricsValue(condition, duration).join());
+                return kv;
+            }).collect(Collectors.toList());
+            ints.forEach(v -> values.addKVInt(v));
 
-                kv.setValue(query.readMetricsValue(condition, duration));
-                values.addKVInt(kv);
-            }
         }
 
         return values;
     }
 
     public IntValues getLinearIntValues(final MetricCondition metrics,
-                                        final Duration duration) throws IOException, ParseException {
-
+                                        final Duration duration) throws IOException {
         MetricsCondition condition = new MetricsCondition();
         condition.setName(metrics.getName());
         condition.setEntity(new MockEntity(metrics.getId()));
 
-        final MetricsValues metricsValues = query.readMetricsValues(condition, duration);
+        final MetricsValues metricsValues = query.readMetricsValues(condition, duration).join();
         return metricsValues.getValues();
     }
 
     public List<IntValues> getMultipleLinearIntValues(final MetricCondition metrics, final int numOfLinear,
-                                                      final Duration duration) throws IOException, ParseException {
+                                                      final Duration duration) throws IOException {
         MetricsCondition condition = new MetricsCondition();
         condition.setName(metrics.getName());
         condition.setEntity(new MockEntity(metrics.getId()));
@@ -97,18 +99,18 @@ public class MetricQuery implements GraphQLQueryResolver {
             labels.add(String.valueOf(i));
         }
 
-        final List<MetricsValues> metricsValues = query.readLabeledMetricsValues(condition, labels, duration);
+        final List<MetricsValues> metricsValues = query.readLabeledMetricsValues(condition, labels, duration).join();
         List<IntValues> response = new ArrayList<>(metricsValues.size());
-        metricsValues.forEach(value -> {
-            response.add(value.getValues());
-        });
-
+        labels.forEach(l -> metricsValues.stream()
+                                         .filter(m -> m.getLabel().equals(l))
+                                         .findAny()
+                                         .ifPresent(values -> response.add(values.getValues())));
         return response;
     }
 
     public List<IntValues> getSubsetOfMultipleLinearIntValues(final MetricCondition metrics,
                                                               final List<Integer> linearIndex,
-                                                              final Duration duration) throws IOException, ParseException {
+                                                              final Duration duration) throws IOException {
         MetricsCondition condition = new MetricsCondition();
         condition.setName(metrics.getName());
         condition.setEntity(new MockEntity(metrics.getId()));
@@ -116,22 +118,22 @@ public class MetricQuery implements GraphQLQueryResolver {
         List<String> labels = new ArrayList<>(linearIndex.size());
         linearIndex.forEach(i -> labels.add(String.valueOf(i)));
 
-        final List<MetricsValues> metricsValues = query.readLabeledMetricsValues(condition, labels, duration);
+        final List<MetricsValues> metricsValues = query.readLabeledMetricsValues(condition, labels, duration).join();
         List<IntValues> response = new ArrayList<>(metricsValues.size());
-        metricsValues.forEach(value -> {
-            response.add(value.getValues());
-        });
-
+        labels.forEach(l -> metricsValues.stream()
+                                         .filter(m -> m.getLabel().equals(l))
+                                         .findAny()
+                                         .ifPresent(values -> response.add(values.getValues())));
         return response;
     }
 
     public Thermodynamic getThermodynamic(final MetricCondition metrics,
-                                          final Duration duration) throws IOException, ParseException {
+                                          final Duration duration) throws IOException {
         MetricsCondition condition = new MetricsCondition();
         condition.setName(metrics.getName());
         condition.setEntity(new MockEntity(metrics.getId()));
 
-        final HeatMap heatMap = query.readHeatMap(condition, duration);
+        final HeatMap heatMap = query.readHeatMap(condition, duration).join();
 
         Thermodynamic thermodynamic = new Thermodynamic();
         final List<Bucket> buckets = heatMap.getBuckets();
@@ -159,6 +161,11 @@ public class MetricQuery implements GraphQLQueryResolver {
     @RequiredArgsConstructor
     private static class MockEntity extends Entity {
         private final String id;
+
+        @Override
+        public boolean isValid() {
+            return true;
+        }
 
         @Override
         public String buildId() {

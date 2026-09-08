@@ -18,58 +18,87 @@
 
 package org.apache.skywalking.oap.server.core.analysis.worker;
 
+import java.lang.reflect.InvocationTargetException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
 import org.apache.skywalking.oap.server.core.CoreModule;
 import org.apache.skywalking.oap.server.core.UnexpectedException;
-import org.apache.skywalking.oap.server.core.analysis.DisableRegister;
 import org.apache.skywalking.oap.server.core.analysis.DownSampling;
 import org.apache.skywalking.oap.server.core.analysis.Stream;
 import org.apache.skywalking.oap.server.core.analysis.StreamProcessor;
+import org.apache.skywalking.oap.server.core.analysis.TimeBucket;
 import org.apache.skywalking.oap.server.core.analysis.record.Record;
 import org.apache.skywalking.oap.server.core.storage.IRecordDAO;
+import org.apache.skywalking.oap.server.core.storage.StorageBuilderFactory;
 import org.apache.skywalking.oap.server.core.storage.StorageDAO;
+import org.apache.skywalking.oap.server.core.storage.StorageException;
 import org.apache.skywalking.oap.server.core.storage.StorageModule;
 import org.apache.skywalking.oap.server.core.storage.annotation.Storage;
-import org.apache.skywalking.oap.server.core.storage.model.INewModel;
 import org.apache.skywalking.oap.server.core.storage.model.Model;
+import org.apache.skywalking.oap.server.core.storage.model.ModelRegistry;
+import org.apache.skywalking.oap.server.core.storage.model.StorageManipulationOpt;
+import org.apache.skywalking.oap.server.core.storage.type.StorageBuilder;
 import org.apache.skywalking.oap.server.library.module.ModuleDefineHolder;
 
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
+
+@Slf4j
 public class RecordStreamProcessor implements StreamProcessor<Record> {
 
     private final static RecordStreamProcessor PROCESSOR = new RecordStreamProcessor();
 
     private Map<Class<? extends Record>, RecordPersistentWorker> workers = new HashMap<>();
 
+    @Setter
+    private int recordDataTTL;
+
+    // Not going to expose this as a configuration, only for testing purpose
+    private final boolean isTestingTTL = "true".equalsIgnoreCase(System.getenv("TESTING_TTL"));
+
     public static RecordStreamProcessor getInstance() {
         return PROCESSOR;
     }
 
+    @Override
     public void in(Record record) {
+        final var now = System.currentTimeMillis();
+        final var recordTimestamp = TimeBucket.getTimestamp(record.getTimeBucket(), DownSampling.Minute);
+        final var isExpired = now - recordTimestamp > TimeUnit.DAYS.toMicros(recordDataTTL);
+        if (isExpired && !isTestingTTL) {
+            log.debug("Receiving expired record: {}, time: {}, ignored", record.id(), record.getTimeBucket());
+            return;
+        }
         RecordPersistentWorker worker = workers.get(record.getClass());
         if (worker != null) {
             worker.in(record);
         }
     }
 
-    @SuppressWarnings("unchecked")
-    public void create(ModuleDefineHolder moduleDefineHolder, Stream stream, Class<? extends Record> recordClass) {
-        if (DisableRegister.INSTANCE.include(stream.name())) {
-            return;
-        }
+    public void create(ModuleDefineHolder moduleDefineHolder, Stream stream, Class<? extends Record> recordClass) throws StorageException {
+        final StorageBuilderFactory storageBuilderFactory = moduleDefineHolder.find(StorageModule.NAME)
+                                                                              .provider()
+                                                                              .getService(StorageBuilderFactory.class);
+        final Class<? extends StorageBuilder> builder = storageBuilderFactory.builderOf(recordClass, stream.builder());
 
         StorageDAO storageDAO = moduleDefineHolder.find(StorageModule.NAME).provider().getService(StorageDAO.class);
         IRecordDAO recordDAO;
         try {
-            recordDAO = storageDAO.newRecordDao(stream.builder().newInstance());
-        } catch (InstantiationException | IllegalAccessException e) {
+            recordDAO = storageDAO.newRecordDao(builder.getDeclaredConstructor().newInstance());
+        } catch (InstantiationException | IllegalAccessException | NoSuchMethodException | InvocationTargetException e) {
             throw new UnexpectedException("Create " + stream.builder().getSimpleName() + " record DAO failure.", e);
         }
 
-        INewModel modelSetter = moduleDefineHolder.find(CoreModule.NAME).provider().getService(INewModel.class);
+        ModelRegistry modelSetter = moduleDefineHolder.find(CoreModule.NAME).provider().getService(ModelRegistry.class);
+        // Record stream doesn't read data from database during the persistent process. Keep the timeRelativeID == false always.
         Model model = modelSetter.add(
-            recordClass, stream.scopeId(), new Storage(stream.name(), DownSampling.Second), true);
-        RecordPersistentWorker persistentWorker = new RecordPersistentWorker(moduleDefineHolder, model, recordDAO);
+            recordClass, stream.scopeId(),
+            new Storage(stream.name(), false, DownSampling.Second),
+            StorageManipulationOpt.schemaCreateIfAbsent());
+        ExportRecordWorker exportWorker = new ExportRecordWorker(moduleDefineHolder);
+        RecordPersistentWorker persistentWorker = new RecordPersistentWorker(moduleDefineHolder, model, recordDAO, exportWorker);
 
         workers.put(recordClass, persistentWorker);
     }

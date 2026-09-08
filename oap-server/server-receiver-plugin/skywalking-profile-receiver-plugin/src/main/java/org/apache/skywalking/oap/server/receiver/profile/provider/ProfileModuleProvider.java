@@ -20,13 +20,13 @@ package org.apache.skywalking.oap.server.receiver.profile.provider;
 
 import org.apache.skywalking.oap.server.core.CoreModule;
 import org.apache.skywalking.oap.server.core.server.GRPCHandlerRegister;
-import org.apache.skywalking.oap.server.library.module.ModuleConfig;
 import org.apache.skywalking.oap.server.library.module.ModuleDefine;
 import org.apache.skywalking.oap.server.library.module.ModuleProvider;
 import org.apache.skywalking.oap.server.library.module.ModuleStartException;
 import org.apache.skywalking.oap.server.library.module.ServiceNotProvidedException;
 import org.apache.skywalking.oap.server.receiver.profile.module.ProfileModule;
 import org.apache.skywalking.oap.server.receiver.profile.provider.handler.ProfileTaskServiceHandler;
+import org.apache.skywalking.oap.server.receiver.profile.provider.handler.ProfileTaskServiceHandlerCompat;
 import org.apache.skywalking.oap.server.receiver.sharing.server.SharingServerModule;
 
 /**
@@ -44,7 +44,7 @@ public class ProfileModuleProvider extends ModuleProvider {
     }
 
     @Override
-    public ModuleConfig createConfigBeanIfAbsent() {
+    public ConfigCreator newConfigCreator() {
         return null;
     }
 
@@ -57,7 +57,9 @@ public class ProfileModuleProvider extends ModuleProvider {
         GRPCHandlerRegister grpcHandlerRegister = getManager().find(SharingServerModule.NAME)
                                                               .provider()
                                                               .getService(GRPCHandlerRegister.class);
-        grpcHandlerRegister.addHandler(new ProfileTaskServiceHandler(getManager()));
+        ProfileTaskServiceHandler profileTaskServiceHandler = new ProfileTaskServiceHandler(getManager());
+        grpcHandlerRegister.addHandler(profileTaskServiceHandler);
+        grpcHandlerRegister.addHandler(new ProfileTaskServiceHandlerCompat(profileTaskServiceHandler));
     }
 
     @Override

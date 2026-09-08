@@ -18,7 +18,8 @@
 
 package org.apache.skywalking.oap.server.tool.profile.core.mock;
 
-import org.apache.skywalking.oap.server.core.source.Source;
+import org.apache.skywalking.oap.server.core.analysis.DispatcherDetectorListener;
+import org.apache.skywalking.oap.server.core.source.ISource;
 import org.apache.skywalking.oap.server.core.source.SourceReceiver;
 
 /**
@@ -26,6 +27,11 @@ import org.apache.skywalking.oap.server.core.source.SourceReceiver;
  */
 public class MockSourceReceiver implements SourceReceiver {
     @Override
-    public void receive(Source source) {
+    public void receive(ISource source) {
+    }
+
+    @Override
+    public DispatcherDetectorListener getDispatcherDetectorListener() {
+        return null;
     }
 }

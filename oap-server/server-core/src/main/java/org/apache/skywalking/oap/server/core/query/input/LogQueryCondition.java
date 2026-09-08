@@ -18,21 +18,26 @@
 
 package org.apache.skywalking.oap.server.core.query.input;
 
+import java.util.List;
 import lombok.Getter;
 import lombok.Setter;
-import org.apache.skywalking.oap.server.core.query.type.LogState;
+import lombok.ToString;
+import org.apache.skywalking.oap.server.core.analysis.manual.searchtag.Tag;
+import org.apache.skywalking.oap.server.core.query.enumeration.Order;
 import org.apache.skywalking.oap.server.core.query.type.Pagination;
 
 @Getter
 @Setter
+@ToString
 public class LogQueryCondition {
-    private String metricName;
-    private int serviceId;
-    private int serviceInstanceId;
+    private String serviceId;
+    private String serviceInstanceId;
     private String endpointId;
-    private String traceId;
-    private LogState state;
-    private String stateCode;
+    private TraceScopeCondition relatedTrace;
     private Duration queryDuration;
     private Pagination paging;
+    private List<Tag> tags;
+    private List<String> keywordsOfContent;
+    private List<String> excludingKeywordsOfContent;
+    private Order queryOrder;
 }

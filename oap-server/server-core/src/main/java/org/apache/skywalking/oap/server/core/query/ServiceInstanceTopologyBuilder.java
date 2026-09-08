@@ -23,25 +23,36 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.skywalking.apm.util.StringUtil;
-import org.apache.skywalking.oap.server.core.CoreModule;
+import org.apache.skywalking.oap.server.core.Const;
 import org.apache.skywalking.oap.server.core.analysis.IDManager;
-import org.apache.skywalking.oap.server.core.config.IComponentLibraryCatalogService;
 import org.apache.skywalking.oap.server.core.query.type.Call;
 import org.apache.skywalking.oap.server.core.query.type.ServiceInstanceNode;
 import org.apache.skywalking.oap.server.core.query.type.ServiceInstanceTopology;
+import org.apache.skywalking.oap.server.core.query.type.debugging.DebuggingSpan;
+import org.apache.skywalking.oap.server.core.query.type.debugging.DebuggingTraceContext;
 import org.apache.skywalking.oap.server.core.source.DetectPoint;
 import org.apache.skywalking.oap.server.library.module.ModuleManager;
 
 @Slf4j
 public class ServiceInstanceTopologyBuilder {
 
-    private final IComponentLibraryCatalogService componentLibraryCatalogService;
-
     public ServiceInstanceTopologyBuilder(ModuleManager moduleManager) {
-        this.componentLibraryCatalogService = moduleManager.find(CoreModule.NAME)
-                                                           .provider()
-                                                           .getService(IComponentLibraryCatalogService.class);
+    }
+
+    ServiceInstanceTopology buildDebuggable(List<Call.CallDetail> serviceInstanceRelationClientCalls,
+                                  List<Call.CallDetail> serviceInstanceRelationServerCalls) {
+        DebuggingTraceContext traceContext = DebuggingTraceContext.TRACE_CONTEXT.get();
+        DebuggingSpan span = null;
+        try {
+            if (traceContext != null) {
+                span = traceContext.createSpan("Build service instance topology");
+            }
+            return build(serviceInstanceRelationClientCalls, serviceInstanceRelationServerCalls);
+        } finally {
+            if (traceContext != null && span != null) {
+                traceContext.stopSpan(span);
+            }
+        }
     }
 
     ServiceInstanceTopology build(List<Call.CallDetail> serviceInstanceRelationClientCalls,
@@ -71,10 +82,6 @@ public class ServiceInstanceTopologyBuilder {
             if (!nodes.containsKey(clientCall.getTarget())) {
                 final ServiceInstanceNode node = buildNode(destService, destServiceInstance);
                 nodes.put(clientCall.getTarget(), node);
-                if (!node.isReal() && StringUtil.isEmpty(node.getType())) {
-                    node.setType(
-                        componentLibraryCatalogService.getServerNameBasedOnComponent(clientCall.getComponentId()));
-                }
             }
 
             if (!callMap.containsKey(clientCall.getId())) {
@@ -85,7 +92,6 @@ public class ServiceInstanceTopologyBuilder {
                 call.setTarget(clientCall.getTarget());
                 call.setId(clientCall.getId());
                 call.addDetectPoint(DetectPoint.CLIENT);
-                call.addSourceComponent(componentLibraryCatalogService.getComponentName(clientCall.getComponentId()));
                 calls.add(call);
             }
         }
@@ -111,12 +117,6 @@ public class ServiceInstanceTopologyBuilder {
                 final ServiceInstanceNode node = buildNode(destService, destServiceInstance);
                 nodes.put(serverCall.getTarget(), node);
             }
-            /*
-             * Service side component id has higher priority
-             */
-            final ServiceInstanceNode serverSideNode = nodes.get(serverCall.getTarget());
-            serverSideNode.setType(
-                componentLibraryCatalogService.getServerNameBasedOnComponent(serverCall.getComponentId()));
 
             if (!callMap.containsKey(serverCall.getId())) {
                 Call call = new Call();
@@ -126,12 +126,10 @@ public class ServiceInstanceTopologyBuilder {
                 call.setTarget(serverCall.getTarget());
                 call.setId(serverCall.getId());
                 call.addDetectPoint(DetectPoint.SERVER);
-                call.addTargetComponent(componentLibraryCatalogService.getComponentName(serverCall.getComponentId()));
                 calls.add(call);
             } else {
                 Call call = callMap.get(serverCall.getId());
                 call.addDetectPoint(DetectPoint.SERVER);
-                call.addTargetComponent(componentLibraryCatalogService.getComponentName(serverCall.getComponentId()));
             }
         }
 
@@ -151,6 +149,7 @@ public class ServiceInstanceTopologyBuilder {
         instanceNode.setServiceId(instanceIDDefinition.getServiceId());
         instanceNode.setServiceName(serviceIDDefinition.getName());
         instanceNode.setReal(serviceIDDefinition.isReal());
+        instanceNode.setType(Const.EMPTY_STRING); //Since 9.4.0, don't provide type for instance topology node.
         return instanceNode;
     }
 }

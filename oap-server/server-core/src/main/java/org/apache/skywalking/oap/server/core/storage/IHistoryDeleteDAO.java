@@ -31,7 +31,7 @@ public interface IHistoryDeleteDAO extends DAO {
      *
      * @param model                data entity.
      * @param timeBucketColumnName column name represents the time. Right now, always {@link Metrics#TIME_BUCKET}
-     * @param ttl                 the number of days should be kept
+     * @param ttl                  the number of days should be kept
      * @throws IOException when error happens in the deletion process.
      */
     void deleteHistory(Model model, String timeBucketColumnName, int ttl) throws IOException;

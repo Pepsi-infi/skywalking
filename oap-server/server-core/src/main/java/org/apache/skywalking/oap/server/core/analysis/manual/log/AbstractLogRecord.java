@@ -18,105 +18,128 @@
 
 package org.apache.skywalking.oap.server.core.analysis.manual.log;
 
-import java.util.HashMap;
-import java.util.Map;
 import lombok.Getter;
 import lombok.Setter;
 import org.apache.skywalking.oap.server.core.UnexpectedException;
+import org.apache.skywalking.oap.server.core.analysis.manual.searchtag.Tag;
+import org.apache.skywalking.oap.server.core.analysis.record.LongText;
 import org.apache.skywalking.oap.server.core.analysis.record.Record;
 import org.apache.skywalking.oap.server.core.query.type.ContentType;
-import org.apache.skywalking.oap.server.core.storage.StorageBuilder;
+import org.apache.skywalking.oap.server.core.storage.StorageID;
+import org.apache.skywalking.oap.server.core.storage.annotation.BanyanDB;
 import org.apache.skywalking.oap.server.core.storage.annotation.Column;
+import org.apache.skywalking.oap.server.core.storage.annotation.ElasticSearch;
+import org.apache.skywalking.oap.server.core.storage.annotation.SQLDatabase;
+import org.apache.skywalking.oap.server.core.storage.type.Convert2Entity;
+import org.apache.skywalking.oap.server.core.storage.type.Convert2Storage;
+import org.apache.skywalking.oap.server.core.storage.type.StorageBuilder;
+
+import java.util.List;
 
 public abstract class AbstractLogRecord extends Record {
-
+    public static final String ADDITIONAL_TAG_TABLE = "log_tag";
     public static final String SERVICE_ID = "service_id";
     public static final String SERVICE_INSTANCE_ID = "service_instance_id";
-    public static final String ENDPOINT_NAME = "endpoint_name";
     public static final String ENDPOINT_ID = "endpoint_id";
     public static final String TRACE_ID = "trace_id";
-    public static final String IS_ERROR = "is_error";
-    public static final String STATUS_CODE = "status_code";
+    public static final String TRACE_SEGMENT_ID = "trace_segment_id";
+    public static final String SPAN_ID = "span_id";
     public static final String CONTENT_TYPE = "content_type";
     public static final String CONTENT = "content";
+    public static final String TAGS_RAW_DATA = "tags_raw_data";
     public static final String TIMESTAMP = "timestamp";
+    public static final String TAGS = "tags";
 
     @Setter
     @Getter
-    @Column(columnName = SERVICE_ID)
-    private int serviceId;
+    @Column(name = SERVICE_ID)
+    @BanyanDB.SeriesID(index = 0)
+    @SQLDatabase.AdditionalEntity(additionalTables = {ADDITIONAL_TAG_TABLE}, reserveOriginalColumns = true)
+    private String serviceId;
     @Setter
     @Getter
-    @Column(columnName = SERVICE_INSTANCE_ID)
-    private int serviceInstanceId;
+    @Column(name = SERVICE_INSTANCE_ID, length = 512)
+    @BanyanDB.SeriesID(index = 1)
+    private String serviceInstanceId;
     @Setter
     @Getter
-    @Column(columnName = ENDPOINT_ID)
+    @Column(name = ENDPOINT_ID, length = 512)
     private String endpointId;
     @Setter
     @Getter
-    @Column(columnName = ENDPOINT_NAME)
-    private String endpointName;
-    @Setter
-    @Getter
-    @Column(columnName = TRACE_ID)
+    @Column(name = TRACE_ID, length = 150)
+    @BanyanDB.IndexRule(indexType = BanyanDB.IndexRule.IndexType.SKIPPING)
     private String traceId;
     @Setter
     @Getter
-    @Column(columnName = IS_ERROR)
-    private int isError;
+    @Column(name = TRACE_SEGMENT_ID, length = 150)
+    private String traceSegmentId;
     @Setter
     @Getter
-    @Column(columnName = STATUS_CODE)
-    private String statusCode;
+    @Column(name = SPAN_ID)
+    @BanyanDB.NoIndexing
+    private int spanId;
     @Setter
     @Getter
-    @Column(columnName = CONTENT_TYPE)
+    @Column(name = CONTENT_TYPE, storageOnly = true)
     private int contentType = ContentType.NONE.value();
     @Setter
     @Getter
-    @Column(columnName = CONTENT)
-    private String content;
+    @Column(name = CONTENT, length = 1_000_000)
+    @ElasticSearch.MatchQuery(analyzer = ElasticSearch.MatchQuery.AnalyzerType.OAP_LOG_ANALYZER)
+    private LongText content;
     @Setter
     @Getter
-    @Column(columnName = TIMESTAMP)
+    @ElasticSearch.EnableDocValues
+    @Column(name = TIMESTAMP)
     private long timestamp;
 
+    /**
+     * All tag binary data.
+     */
+    @Setter
+    @Getter
+    @Column(name = TAGS_RAW_DATA, storageOnly = true)
+    private byte[] tagsRawData;
+    @Setter
+    @Getter
+    @Column(name = TAGS, indexOnly = true, length = Tag.TAG_LENGTH)
+    @SQLDatabase.AdditionalEntity(additionalTables = {ADDITIONAL_TAG_TABLE})
+    private List<String> tagsInString;
+
     @Override
-    public String id() {
+    public StorageID id() {
         throw new UnexpectedException("AbstractLogRecord doesn't provide id()");
     }
 
     public static abstract class Builder<T extends AbstractLogRecord> implements StorageBuilder<T> {
-        protected void map2Data(T record, Map<String, Object> dbMap) {
-            record.setServiceId(((Number) dbMap.get(SERVICE_ID)).intValue());
-            record.setServiceInstanceId(((Number) dbMap.get(SERVICE_INSTANCE_ID)).intValue());
-            record.setEndpointId((String) dbMap.get(ENDPOINT_ID));
-            record.setEndpointName((String) dbMap.get(ENDPOINT_NAME));
-            record.setIsError(((Number) dbMap.get(IS_ERROR)).intValue());
-            record.setTraceId((String) dbMap.get(TRACE_ID));
-            record.setStatusCode((String) dbMap.get(STATUS_CODE));
-            record.setContentType(((Number) dbMap.get(CONTENT_TYPE)).intValue());
-            record.setContent((String) dbMap.get(CONTENT));
-            record.setTimestamp(((Number) dbMap.get(TIMESTAMP)).longValue());
-            record.setTimeBucket(((Number) dbMap.get(TIME_BUCKET)).longValue());
+        protected void map2Data(T record, final Convert2Entity converter) {
+            record.setServiceId((String) converter.get(SERVICE_ID));
+            record.setServiceInstanceId((String) converter.get(SERVICE_INSTANCE_ID));
+            record.setEndpointId((String) converter.get(ENDPOINT_ID));
+            record.setTraceId((String) converter.get(TRACE_ID));
+            record.setTraceSegmentId((String) converter.get(TRACE_SEGMENT_ID));
+            record.setSpanId(((Number) converter.get(SPAN_ID)).intValue());
+            record.setContentType(((Number) converter.get(CONTENT_TYPE)).intValue());
+            record.setContent(new LongText((String) converter.get(CONTENT)));
+            record.setTimestamp(((Number) converter.get(TIMESTAMP)).longValue());
+            record.setTagsRawData(converter.getBytes(TAGS_RAW_DATA));
+            record.setTimeBucket(((Number) converter.get(TIME_BUCKET)).longValue());
         }
 
-        @Override
-        public Map<String, Object> data2Map(AbstractLogRecord record) {
-            Map<String, Object> map = new HashMap<>();
-            map.put(SERVICE_ID, record.getServiceId());
-            map.put(SERVICE_INSTANCE_ID, record.getServiceInstanceId());
-            map.put(ENDPOINT_ID, record.getEndpointId());
-            map.put(ENDPOINT_NAME, record.getEndpointName());
-            map.put(TRACE_ID, record.getTraceId());
-            map.put(IS_ERROR, record.getIsError());
-            map.put(STATUS_CODE, record.getStatusCode());
-            map.put(TIME_BUCKET, record.getTimeBucket());
-            map.put(CONTENT_TYPE, record.getContentType());
-            map.put(CONTENT, record.getContent());
-            map.put(TIMESTAMP, record.getTimestamp());
-            return map;
+        protected void data2Map(final T record, final Convert2Storage converter) {
+            converter.accept(SERVICE_ID, record.getServiceId());
+            converter.accept(SERVICE_INSTANCE_ID, record.getServiceInstanceId());
+            converter.accept(ENDPOINT_ID, record.getEndpointId());
+            converter.accept(TRACE_ID, record.getTraceId());
+            converter.accept(TRACE_SEGMENT_ID, record.getTraceSegmentId());
+            converter.accept(SPAN_ID, record.getSpanId());
+            converter.accept(TIME_BUCKET, record.getTimeBucket());
+            converter.accept(CONTENT_TYPE, record.getContentType());
+            converter.accept(CONTENT, record.getContent());
+            converter.accept(TIMESTAMP, record.getTimestamp());
+            converter.accept(TAGS_RAW_DATA, record.getTagsRawData());
+            converter.accept(TAGS, record.getTagsInString());
         }
     }
 }

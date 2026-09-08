@@ -19,6 +19,7 @@
 package org.apache.skywalking.oap.server.core.worker;
 
 import org.apache.skywalking.oap.server.core.analysis.Stream;
+import org.apache.skywalking.oap.server.core.analysis.worker.MetricStreamKind;
 import org.apache.skywalking.oap.server.core.remote.data.StreamData;
 import org.apache.skywalking.oap.server.library.module.Service;
 
@@ -29,7 +30,18 @@ public interface IWorkerInstanceSetter extends Service {
     /**
      * @param remoteReceiverWorkName worker name
      * @param instance The worker instance processes the given streamDataClass.
+     * @param kind Metric kind (OAL, MAL).
      * @param streamDataClass Type of metrics.
      */
-    void put(String remoteReceiverWorkName, AbstractWorker instance, Class<? extends StreamData> streamDataClass);
+    void put(String remoteReceiverWorkName, AbstractWorker instance,
+             MetricStreamKind kind, Class<? extends StreamData> streamDataClass);
+
+    /**
+     * Remove the registration for {@code remoteReceiverWorkName}. Idempotent — a no-op when
+     * no such key exists. Required for the runtime-rule hot-remove path: without it, a
+     * subsequent {@link #put} with the same name throws "Duplicate worker name" and blocks
+     * any metric re-registration (shape-break remove+apply, operator recovery push via
+     * {@code /addOrUpdate?force=true}, etc.).
+     */
+    void remove(String remoteReceiverWorkName);
 }

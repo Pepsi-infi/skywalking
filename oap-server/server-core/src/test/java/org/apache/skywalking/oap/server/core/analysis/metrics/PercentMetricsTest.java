@@ -18,56 +18,57 @@
 
 package org.apache.skywalking.oap.server.core.analysis.metrics;
 
-import org.apache.skywalking.oap.server.core.analysis.metrics.expression.EqualMatch;
+import org.apache.skywalking.oap.server.core.analysis.metrics.expression.StringMatch;
 import org.apache.skywalking.oap.server.core.remote.grpc.proto.RemoteData;
-import org.junit.Assert;
-import org.junit.Test;
+import org.apache.skywalking.oap.server.core.storage.StorageID;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class PercentMetricsTest {
     @Test
     public void testEntranceCombine() {
         PercentMetricsImpl impl = new PercentMetricsImpl();
-        impl.combine(new EqualMatch().match(true, true));
-        impl.combine(new EqualMatch().match(true, false));
-        impl.combine(new EqualMatch().match(true, false));
+        impl.combine(new StringMatch().match(true, true));
+        impl.combine(new StringMatch().match(true, false));
+        impl.combine(new StringMatch().match(true, false));
 
         impl.calculate();
 
-        Assert.assertEquals(3333, impl.getValue());
+        Assertions.assertEquals(3333, impl.getValue());
 
         impl = new PercentMetricsImpl();
-        impl.combine(new EqualMatch().match(true, true));
-        impl.combine(new EqualMatch().match(true, true));
-        impl.combine(new EqualMatch().match(true, false));
+        impl.combine(new StringMatch().match(true, true));
+        impl.combine(new StringMatch().match(true, true));
+        impl.combine(new StringMatch().match(true, false));
 
         impl.calculate();
 
-        Assert.assertEquals(6666, impl.getValue());
+        Assertions.assertEquals(6666, impl.getValue());
     }
 
     @Test
     public void testSelfCombine() {
         PercentMetricsImpl impl = new PercentMetricsImpl();
-        impl.combine(new EqualMatch().match(true, true));
-        impl.combine(new EqualMatch().match(true, false));
-        impl.combine(new EqualMatch().match(true, false));
+        impl.combine(new StringMatch().match(true, true));
+        impl.combine(new StringMatch().match(true, false));
+        impl.combine(new StringMatch().match(true, false));
 
         PercentMetricsImpl impl2 = new PercentMetricsImpl();
-        impl2.combine(new EqualMatch().match(true, true));
-        impl2.combine(new EqualMatch().match(true, true));
-        impl2.combine(new EqualMatch().match(true, false));
+        impl2.combine(new StringMatch().match(true, true));
+        impl2.combine(new StringMatch().match(true, true));
+        impl2.combine(new StringMatch().match(true, false));
 
         impl.combine(impl2);
 
         impl.calculate();
 
-        Assert.assertEquals(5000, impl.getValue());
+        Assertions.assertEquals(5000, impl.getValue());
     }
 
     public class PercentMetricsImpl extends PercentMetrics {
 
         @Override
-        public String id() {
+        protected StorageID id0() {
             return null;
         }
 

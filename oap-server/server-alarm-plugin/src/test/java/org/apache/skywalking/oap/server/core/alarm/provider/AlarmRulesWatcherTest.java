@@ -18,53 +18,42 @@
 
 package org.apache.skywalking.oap.server.core.alarm.provider;
 
+import org.apache.skywalking.mqe.rt.exception.IllegalExpressionException;
+import org.apache.skywalking.oap.server.configuration.api.ConfigChangeWatcher;
+import org.apache.skywalking.oap.server.core.query.enumeration.Scope;
+import org.apache.skywalking.oap.server.core.storage.annotation.Column;
+import org.apache.skywalking.oap.server.core.storage.annotation.ValueColumnMetadata;
+import org.apache.skywalking.oap.server.library.util.CollectionUtils;
+import org.apache.skywalking.oap.server.library.util.ResourceUtils;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.MockitoAnnotations;
+import org.mockito.Spy;
+
 import java.io.IOException;
 import java.io.Reader;
 import java.util.ArrayList;
 import java.util.Arrays;
-import org.apache.skywalking.oap.server.configuration.api.ConfigChangeWatcher;
-import org.apache.skywalking.oap.server.library.util.ResourceUtils;
-import org.junit.Before;
-import org.junit.Test;
-import org.mockito.MockitoAnnotations;
-import org.mockito.Spy;
+import java.util.HashMap;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.spy;
 
 public class AlarmRulesWatcherTest {
     @Spy
-    private AlarmRulesWatcher alarmRulesWatcher = new AlarmRulesWatcher(new Rules(), null);
+    private AlarmRulesWatcher alarmRulesWatcher = new AlarmRulesWatcher(new Rules(), null, null);
 
-    private AlarmRule.AlarmRuleBuilder rulePrototypeBuilder = AlarmRule.builder()
-                                                                       .alarmRuleName("name1")
-                                                                       .count(1)
-                                                                       .includeNames(new ArrayList<String>() {
-                                                                           {
-                                                                               add("1");
-                                                                               add("2");
-                                                                           }
-                                                                       })
-                                                                       .excludeNames(new ArrayList<String>() {
-                                                                           {
-                                                                               add("3");
-                                                                               add("4");
-                                                                           }
-                                                                       })
-                                                                       .message("test")
-                                                                       .metricsName("metrics1")
-                                                                       .op(">")
-                                                                       .period(1)
-                                                                       .silencePeriod(2)
-                                                                       .threshold("2");
-
-    @Before
+    @BeforeEach
     public void setUp() {
         MockitoAnnotations.initMocks(this);
+        ValueColumnMetadata.INSTANCE.putIfAbsent(
+            "service_percent", "testColumn", Column.ValueDataType.COMMON_VALUE, 0, Scope.Service.getScopeId());
+        ValueColumnMetadata.INSTANCE.putIfAbsent(
+            "endpoint_percent", "testColumn", Column.ValueDataType.COMMON_VALUE, 0, Scope.Endpoint.getScopeId());
     }
 
     @Test
@@ -77,108 +66,128 @@ public class AlarmRulesWatcherTest {
 
         alarmRulesWatcher.notify(new ConfigChangeWatcher.ConfigChangeEvent(new String(chars, 0, length), ConfigChangeWatcher.EventType.MODIFY));
 
-        assertEquals(2, alarmRulesWatcher.getRules().size());
-        assertEquals(2, alarmRulesWatcher.getWebHooks().size());
+        assertEquals(5, alarmRulesWatcher.getRules().size());
+        assertEquals(2, alarmRulesWatcher.getWebHooks().get(AlarmHooksType.webhook.name() + ".default").getUrls().size());
         assertNotNull(alarmRulesWatcher.getGrpchookSetting());
-        assertEquals(9888, alarmRulesWatcher.getGrpchookSetting().getTargetPort());
-        assertEquals(2, alarmRulesWatcher.getRunningContext().size());
+        assertEquals(9888, alarmRulesWatcher.getGrpchookSetting().get(AlarmHooksType.gRPC.name() + ".default").getTargetPort());
+        assertEquals(4, alarmRulesWatcher.getRunningContext().size());
+        assertNotNull(alarmRulesWatcher.getDingtalkSettings());
+        assertNotNull(alarmRulesWatcher.getWechatSettings());
+        assertEquals(2, alarmRulesWatcher.getSlackSettings().size());
+        assertNotNull(alarmRulesWatcher.getWeLinkSettings());
     }
 
     @Test
     public void shouldClearAlarmRulesOnEventDeleted() throws IOException {
         Reader reader = ResourceUtils.read("alarm-settings.yml");
-        Rules defaultRules = new RulesReader(reader).readRules();
+        Rules defaultRules = new RulesReader(reader, null).readRules();
 
-        alarmRulesWatcher = spy(new AlarmRulesWatcher(defaultRules, null));
+        alarmRulesWatcher = spy(new AlarmRulesWatcher(defaultRules, null, null));
 
         alarmRulesWatcher.notify(new ConfigChangeWatcher.ConfigChangeEvent("whatever", ConfigChangeWatcher.EventType.DELETE));
 
         assertEquals(0, alarmRulesWatcher.getRules().size());
         assertEquals(0, alarmRulesWatcher.getWebHooks().size());
-        assertNull(alarmRulesWatcher.getGrpchookSetting());
+        assertTrue(CollectionUtils.isEmpty(alarmRulesWatcher.getGrpchookSetting()));
         assertEquals(0, alarmRulesWatcher.getRunningContext().size());
     }
 
     @Test
-    public void shouldKeepExistedRunningRuleIfAlarmRuleExists() {
-        AlarmRule.AlarmRuleBuilder ruleBuilder = rulePrototypeBuilder;
-
-        AlarmRule rule = ruleBuilder.build();
+    public void shouldKeepExistedRunningRuleIfAlarmRuleExists() throws IllegalExpressionException {
+        AlarmRule rule = newAlarmRule("name1", "avg(service_percent) < 80");
         Rules rules = new Rules();
         rules.getRules().add(rule);
 
-        alarmRulesWatcher = spy(new AlarmRulesWatcher(rules, null));
+        alarmRulesWatcher = spy(new AlarmRulesWatcher(rules, null, null));
         assertEquals(1, alarmRulesWatcher.getRunningContext().size());
-        assertEquals(1, alarmRulesWatcher.getRunningContext().get(rule.getMetricsName()).size());
+        assertEquals(1, alarmRulesWatcher.getRunningContext().get(rule.getExpression()).size());
 
-        RunningRule runningRule = alarmRulesWatcher.getRunningContext().get(rule.getMetricsName()).get(0);
+        RunningRule runningRule = alarmRulesWatcher.getRunningContext().get(rule.getExpression()).get(0);
 
         Rules updatedRules = new Rules();
-        updatedRules.getRules().addAll(Arrays.asList(rule, ruleBuilder.alarmRuleName("name2").build()));
+        updatedRules.getRules().addAll(Arrays.asList(rule, newAlarmRule("name2", "avg(service_percent) < 80")));
 
         alarmRulesWatcher.notify(updatedRules);
 
         assertEquals(1, alarmRulesWatcher.getRunningContext().size());
-        assertEquals(2, alarmRulesWatcher.getRunningContext().get(rule.getMetricsName()).size());
-        assertEquals("The same alarm rule should map to the same existed running rule", runningRule, alarmRulesWatcher.getRunningContext()
-                                                                                                                      .get(rule
-                                                                                                                          .getMetricsName())
-                                                                                                                      .get(0));
+        assertEquals(2, alarmRulesWatcher.getRunningContext().get(rule.getExpression()).size());
+        assertEquals(
+                runningRule, alarmRulesWatcher.getRunningContext().get(rule.getExpression()).get(0),
+                "The same alarm rule should map to the same existed running rule");
     }
 
     @Test
-    public void shouldRemoveRunningRuleIfAlarmRuleIsRemoved() {
-        AlarmRule.AlarmRuleBuilder ruleBuilder = rulePrototypeBuilder;
-
-        AlarmRule rule = ruleBuilder.build();
+    public void shouldRemoveRunningRuleIfAlarmRuleIsRemoved() throws IllegalExpressionException {
+        AlarmRule rule = newAlarmRule("name1", "avg(service_percent) < 80");
         Rules rules = new Rules();
         rules.getRules().add(rule);
 
-        alarmRulesWatcher = spy(new AlarmRulesWatcher(rules, null));
+        alarmRulesWatcher = spy(new AlarmRulesWatcher(rules, null, null));
         assertEquals(1, alarmRulesWatcher.getRunningContext().size());
-        assertEquals(1, alarmRulesWatcher.getRunningContext().get(rule.getMetricsName()).size());
+        assertEquals(1, alarmRulesWatcher.getRunningContext().get(rule.getExpression()).size());
 
-        RunningRule runningRule = alarmRulesWatcher.getRunningContext().get(rule.getMetricsName()).get(0);
+        RunningRule runningRule = alarmRulesWatcher.getRunningContext().get(rule.getExpression()).get(0);
 
         Rules updatedRules = new Rules();
-        updatedRules.getRules().add(ruleBuilder.alarmRuleName("name2").build());
+        updatedRules.getRules().add(newAlarmRule("name2", "avg(service_percent) < 80"));
 
         alarmRulesWatcher.notify(updatedRules);
 
         assertEquals(1, alarmRulesWatcher.getRunningContext().size());
-        assertEquals(1, alarmRulesWatcher.getRunningContext().get(rule.getMetricsName()).size());
-        assertNotEquals("The new alarm rule should map to a different running rule", runningRule, alarmRulesWatcher.getRunningContext()
-                                                                                                                   .get(rule
-                                                                                                                       .getMetricsName())
-                                                                                                                   .get(0));
+        assertEquals(1, alarmRulesWatcher.getRunningContext().get(rule.getExpression()).size());
+        assertNotEquals(
+                runningRule, alarmRulesWatcher.getRunningContext().get(rule.getExpression()).get(0),
+                "The new alarm rule should map to a different running rule");
     }
 
     @Test
-    public void shouldReplaceRunningRuleIfAlarmRulesAreReplaced() {
-        AlarmRule.AlarmRuleBuilder ruleBuilder = rulePrototypeBuilder;
-
-        AlarmRule rule = ruleBuilder.build();
+    public void shouldReplaceRunningRuleIfAlarmRulesAreReplaced() throws IllegalExpressionException {
+        AlarmRule rule = newAlarmRule("name1", "avg(service_percent) < 80");
         Rules rules = new Rules();
         rules.getRules().add(rule);
 
-        alarmRulesWatcher = spy(new AlarmRulesWatcher(rules, null));
+        alarmRulesWatcher = spy(new AlarmRulesWatcher(rules, null, null));
         assertEquals(1, alarmRulesWatcher.getRunningContext().size());
-        assertEquals(1, alarmRulesWatcher.getRunningContext().get(rule.getMetricsName()).size());
+        assertEquals(1, alarmRulesWatcher.getRunningContext().get(rule.getExpression()).size());
 
         Rules updatedRules = new Rules();
         // replace the original alarm rules
         updatedRules.getRules()
-                    .addAll(Arrays.asList(ruleBuilder.alarmRuleName("name2")
-                                                     .metricsName("metrics2")
-                                                     .build(), ruleBuilder.alarmRuleName("name3")
-                                                                          .metricsName("metrics3")
-                                                                          .build()));
+                    .addAll(Arrays.asList(
+                        newAlarmRule("name2", "avg(service_percent) < 90"),
+                        newAlarmRule("name3", "avg(service_percent) < 99")
+                    ));
 
         alarmRulesWatcher.notify(updatedRules);
 
         assertEquals(2, alarmRulesWatcher.getRunningContext().size());
-        assertNull(alarmRulesWatcher.getRunningContext().get("metrics1"));
-        assertEquals(1, alarmRulesWatcher.getRunningContext().get("metrics2").size());
-        assertEquals(1, alarmRulesWatcher.getRunningContext().get("metrics3").size());
+        assertNull(alarmRulesWatcher.getRunningContext().get("avg(service_percent) < 80"));
+        assertEquals(1, alarmRulesWatcher.getRunningContext().get("avg(service_percent) < 90").size());
+        assertEquals(1, alarmRulesWatcher.getRunningContext().get("avg(service_percent) < 99").size());
+    }
+
+    private AlarmRule newAlarmRule(String name, String expression) throws IllegalExpressionException {
+       AlarmRule alarmRule = new AlarmRule(null);
+        alarmRule.setAlarmRuleName(name);
+        alarmRule.setIncludeNames(new ArrayList<String>() {
+            {
+                add("1");
+                add("2");
+            }
+        });
+        alarmRule.setExcludeNames(new ArrayList<String>() {
+            {
+                add("3");
+                add("4");
+            }
+        });
+        alarmRule.setMessage("test");
+        alarmRule.setExpression(expression);
+        alarmRule.setPeriod(1);
+        alarmRule.setSilencePeriod(2);
+        alarmRule.setTags(new HashMap<String, String>() {{
+            put("key", "value");
+        }});
+        return alarmRule;
     }
 }

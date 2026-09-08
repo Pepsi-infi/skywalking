@@ -18,14 +18,19 @@
 
 package org.apache.skywalking.oap.server.core.remote;
 
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import java.util.Objects;
 import org.apache.skywalking.oap.server.core.CoreModule;
+import org.apache.skywalking.oap.server.core.alarm.AlarmModule;
+import org.apache.skywalking.oap.server.core.alarm.AlarmStatusWatcherService;
 import org.apache.skywalking.oap.server.core.remote.data.StreamData;
 import org.apache.skywalking.oap.server.core.remote.grpc.proto.Empty;
 import org.apache.skywalking.oap.server.core.remote.grpc.proto.RemoteData;
 import org.apache.skywalking.oap.server.core.remote.grpc.proto.RemoteMessage;
 import org.apache.skywalking.oap.server.core.remote.grpc.proto.RemoteServiceGrpc;
+import org.apache.skywalking.oap.server.core.remote.grpc.proto.StatusRequest;
+import org.apache.skywalking.oap.server.core.remote.grpc.proto.StatusResponse;
 import org.apache.skywalking.oap.server.core.worker.AbstractWorker;
 import org.apache.skywalking.oap.server.core.worker.IWorkerInstanceGetter;
 import org.apache.skywalking.oap.server.core.worker.RemoteHandleWorker;
@@ -46,7 +51,7 @@ import org.slf4j.LoggerFactory;
  */
 public class RemoteServiceHandler extends RemoteServiceGrpc.RemoteServiceImplBase implements GRPCHandler {
 
-    private static final Logger logger = LoggerFactory.getLogger(RemoteServiceHandler.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(RemoteServiceHandler.class);
 
     private final ModuleDefineHolder moduleDefineHolder;
     private IWorkerInstanceGetter workerInstanceGetter;
@@ -54,6 +59,7 @@ public class RemoteServiceHandler extends RemoteServiceGrpc.RemoteServiceImplBas
     private CounterMetrics remoteInErrorCounter;
     private CounterMetrics remoteInTargetNotFoundCounter;
     private HistogramMetrics remoteInHistogram;
+    private AlarmStatusWatcherService alarmStatusWatcher;
 
     public RemoteServiceHandler(ModuleDefineHolder moduleDefineHolder) {
         this.moduleDefineHolder = moduleDefineHolder;
@@ -116,24 +122,33 @@ public class RemoteServiceHandler extends RemoteServiceGrpc.RemoteServiceImplBas
                     String nextWorkerName = message.getNextWorkerName();
                     RemoteData remoteData = message.getRemoteData();
 
-                    try {
-                        RemoteHandleWorker handleWorker = workerInstanceGetter.get(nextWorkerName);
-                        if (handleWorker != null) {
-                            AbstractWorker nextWorker = handleWorker.getWorker();
-                            StreamData streamData = handleWorker.getStreamDataClass().newInstance();
-                            streamData.deserialize(remoteData);
-                            nextWorker.in(streamData);
-                        } else {
-                            remoteInTargetNotFoundCounter.inc();
-                            logger.warn(
-                                "Work name [{}] not found. Check OAL script, make sure they are same in the whole cluster.",
-                                nextWorkerName
-                            );
+                    RemoteHandleWorker handleWorker = workerInstanceGetter.get(nextWorkerName);
+                    if (handleWorker != null) {
+                        AbstractWorker nextWorker = handleWorker.getWorker();
+                        StreamData streamData;
+                        try {
+                            streamData = handleWorker.newStreamDataInstance();
+                        } catch (Throwable t) {
+                            remoteInErrorCounter.inc();
+                            LOGGER.error(t.getMessage(), t);
+                            return;
                         }
-                    } catch (Throwable t) {
-                        remoteInErrorCounter.inc();
-                        logger.error(t.getMessage(), t);
+                        try {
+                            streamData.deserialize(remoteData);
+                        } catch (Throwable t) {
+                            remoteInErrorCounter.inc();
+                            LOGGER.error("Can't deserialize data {}, this data is discarded.", message, t);
+                            return;
+                        }
+                        nextWorker.in(streamData);
+                    } else {
+                        remoteInTargetNotFoundCounter.inc();
+                        LOGGER.warn(
+                            "Data is discarded due to worker not found. Check OAL/MAL script, make sure they are aligned in the whole cluster. The data is {}",
+                            message
+                        );
                     }
+
                 } finally {
                     timer.finish();
                 }
@@ -141,7 +156,14 @@ public class RemoteServiceHandler extends RemoteServiceGrpc.RemoteServiceImplBas
 
             @Override
             public void onError(Throwable throwable) {
-                logger.error(throwable.getMessage(), throwable);
+                Status status = Status.fromThrowable(throwable);
+                if (Status.CANCELLED.getCode() == status.getCode()) {
+                    if (LOGGER.isDebugEnabled()) {
+                        LOGGER.debug(throwable.getMessage(), throwable);
+                    }
+                    return;
+                }
+                LOGGER.error(throwable.getMessage(), throwable);
             }
 
             @Override
@@ -150,5 +172,47 @@ public class RemoteServiceHandler extends RemoteServiceGrpc.RemoteServiceImplBas
                 responseObserver.onCompleted();
             }
         };
+    }
+
+    @Override
+    public void syncStatus(StatusRequest statusRequest, StreamObserver<StatusResponse> responseObserver) {
+        if (statusRequest.getRequestCase().equals(StatusRequest.RequestCase.ALARMREQUEST)) {
+            switch (statusRequest.getAlarmRequest().getRequestType()) {
+                case GET_ALARM_RULES:
+                    responseObserver.onNext(
+                        StatusResponse.newBuilder().setAlarmStatus(getAlarmStatusWatcher().getAlarmRules()).build());
+                    responseObserver.onCompleted();
+                    break;
+                case GET_ALARM_RULE_BY_ID:
+                    responseObserver.onNext(
+                        StatusResponse.newBuilder()
+                                      .setAlarmStatus(getAlarmStatusWatcher().getAlarmRuleById(
+                                          statusRequest.getAlarmRequest().getRuleId()))
+                                      .build());
+                    responseObserver.onCompleted();
+                    break;
+                case GET_ALARM_RULE_CONTEXT:
+                    responseObserver.onNext(
+                        StatusResponse.newBuilder()
+                                      .setAlarmStatus(getAlarmStatusWatcher().getAlarmRuleContext(
+                                          statusRequest.getAlarmRequest().getRuleId(),
+                                          statusRequest.getAlarmRequest().getEntityName()
+                                      ))
+                                      .build());
+                    responseObserver.onCompleted();
+                    break;
+                default:
+                    throw new IllegalArgumentException("Unknown request type: " + statusRequest.getRequestCase());
+
+            }
+        }
+    }
+
+    private AlarmStatusWatcherService getAlarmStatusWatcher() {
+        if (alarmStatusWatcher == null) {
+            alarmStatusWatcher = moduleDefineHolder.find(AlarmModule.NAME)
+                                                   .provider().getService(AlarmStatusWatcherService.class);
+        }
+        return alarmStatusWatcher;
     }
 }
